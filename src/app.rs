@@ -206,8 +206,9 @@ impl TextViewerApp {
     fn go_to_line(&mut self) {
         if let Ok(line_num) = self.goto_line_input.parse::<usize>() {
             if line_num > 0 && line_num <= self.line_indexer.total_lines() {
-                let target_line = line_num - 1; // 0-indexed, show at top of viewport
-                self.scroll_line = target_line;
+                let target_line = line_num - 1; // 0-indexed
+                // Show a few lines of context above the target line for better orientation
+                self.scroll_line = target_line.saturating_sub(3);
                 self.scroll_to_row = Some(target_line);
                 self.status_message = format!("Jumped to line {}", line_num);
             } else {
@@ -383,7 +384,9 @@ impl TextViewerApp {
                         self.line_indexer.total_lines(),
                         |ui, row_range| {
                             // Capture the first visible row
-                            first_visible_row = row_range.clone().next();
+                            if first_visible_row.is_none() {
+                                first_visible_row = row_range.clone().next();
+                            }
                             
                             for line_num in row_range {
                                 // Use get_line_with_reader for sparse index support
@@ -417,6 +420,7 @@ impl TextViewerApp {
                                         }
                                         
                                         // Ensure labels don't consume scroll events
+                                        label.surrender_focus();
                                     });
                                 }
                             }
@@ -426,8 +430,6 @@ impl TextViewerApp {
                 // Update scroll_line to match what was actually displayed
                 if let Some(first_row) = first_visible_row {
                     self.scroll_line = first_row;
-                } else {
-                    self.scroll_line = 0;
                 }
             } else {
                 ui.centered_and_justified(|ui| {
