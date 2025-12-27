@@ -1,4 +1,5 @@
 use crate::file_reader::FileReader;
+use rayon::prelude::*;
 use regex::Regex;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -106,10 +107,7 @@ impl SearchEngine {
         }
 
         // 获取可用cpu数量
-        let num_threads = std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(1)
-            .max(1);
+        let num_threads = rayon::current_num_threads();
 
         let chunk_size = file_len.div_ceil(num_threads);
         let query_len = self.query.len();
@@ -118,50 +116,45 @@ impl SearchEngine {
 
         let regex = self.regex.clone();
 
-        //激活多个线程对不同分区进行查找
+        //使用 Rayon 并行处理不同分区
         thread::spawn(move || {
-            let mut handles = vec![];
+            // 使用 Rayon 的并行迭代器处理所有线程块
+            let chunk_results: Vec<Result<usize, String>> = (0..num_threads)
+                .into_par_iter()
+                .map(|i| {
+                    let thread_start = i * chunk_size;
+                    if thread_start >= file_len {
+                        return Ok(0);
+                    }
+                    let thread_end = (thread_start + chunk_size).min(file_len);
 
-            for i in 0..num_threads {
-                let thread_start = i * chunk_size;
-                if thread_start >= file_len {
-                    break;
-                }
-                let thread_end = (thread_start + chunk_size).min(file_len);
-
-                let reader_clone = reader.clone();
-                let tx_clone = tx.clone();
-                let regex_clone = regex.clone();
-                let cancel_token_clone = cancel_token.clone();
-
-                let handle = thread::spawn(move || {
-                    if let Some(regex) = regex_clone {
+                    if let Some(ref regex) = regex {
                         let mut pos = thread_start;
                         // Process in smaller batches to avoid high memory usage
                         const BATCH_SIZE: usize = 4 * 1024 * 1024; // 4MB
                         let mut local_count = 0;
 
                         while pos < thread_end {
-                            if cancel_token_clone.load(Ordering::Relaxed) {
-                                return;
+                            if cancel_token.load(Ordering::Relaxed) {
+                                return Ok(local_count);
                             }
 
                             let batch_end = (pos + BATCH_SIZE).min(thread_end);
                             // Add overlap to catch matches crossing batch boundaries
                             let read_end = (batch_end + overlap).min(file_len);
 
-                            let chunk_bytes = reader_clone.get_bytes(pos, read_end);
+                            let chunk_bytes = reader.get_bytes(pos, read_end);
                             let chunk_text = match std::str::from_utf8(chunk_bytes) {
                                 Ok(t) => t.to_string(),
                                 Err(_) => {
-                                    let (cow, _, _) = reader_clone.encoding().decode(chunk_bytes);
+                                    let (cow, _, _) = reader.encoding().decode(chunk_bytes);
                                     cow.into_owned()
                                 }
                             };
 
                             for mat in regex.find_iter(&chunk_text) {
-                                if cancel_token_clone.load(Ordering::Relaxed) {
-                                    return;
+                                if cancel_token.load(Ordering::Relaxed) {
+                                    return Ok(local_count);
                                 }
                                 let match_start = mat.start();
                                 let absolute_start = pos + match_start;
@@ -176,17 +169,32 @@ impl SearchEngine {
 
                             pos = batch_end;
                         }
-                        let _ = tx_clone.send(SearchMessage::CountResult(local_count));
+                        Ok(local_count)
                     } else {
-                        let _ = tx_clone.send(SearchMessage::Error("Invalid regex".to_string()));
+                        Err("Invalid regex".to_string())
                     }
-                });
-                handles.push(handle);
+                })
+                .collect();
+
+            // 处理结果
+            if cancel_token.load(Ordering::Relaxed) {
+                return;
             }
 
-            for h in handles {
-                let _ = h.join();
+            for result in chunk_results {
+                match result {
+                    Ok(count) => {
+                        if tx.send(SearchMessage::CountResult(count)).is_err() {
+                            return;
+                        }
+                    }
+                    Err(e) => {
+                        let _ = tx.send(SearchMessage::Error(e));
+                        return;
+                    }
+                }
             }
+
             if !cancel_token.load(Ordering::Relaxed) {
                 let _ = tx.send(SearchMessage::Done(SearchType::Count));
             }
@@ -361,3 +369,5 @@ mod tests {
         Ok(())
     }
 }
+
+//4662219
