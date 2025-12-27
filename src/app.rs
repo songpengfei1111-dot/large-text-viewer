@@ -1333,10 +1333,9 @@ impl TextViewerApp {
         egui::CentralPanel::default().show(ctx, |ui| {
             if let Some(ref reader) = self.file_reader {
                 let available_height = ui.available_height();
-                let font_id = egui::FontId::monospace(self.font_size);
+                let font_id = egui::FontId::monospace(self.font_size); //？
                 let line_height = ui.fonts(|f| f.row_height(&font_id));
-                self.visible_lines =
-                    ((available_height / line_height).ceil() as usize).saturating_add(2);
+                self.visible_lines = ((available_height / line_height).ceil() as usize).saturating_add(2);
 
                 let mut scroll_area = if self.wrap_mode {
                     egui::ScrollArea::vertical()

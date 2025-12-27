@@ -134,12 +134,9 @@ impl LineIndexer {
         }
     }
 
+    // 估计位置->该行range
     // Helper method to get actual line content by scanning from estimated position
-    pub fn get_line_with_reader(
-        &self,
-        line_num: usize,
-        reader: &FileReader,
-    ) -> Option<(usize, usize)> {
+    pub fn get_line_with_reader(&self, line_num: usize, reader: &FileReader, ) -> Option<(usize, usize)> {
         if self.sample_interval == 0 {
             // Use full index
             return self.get_line_range(line_num);
@@ -148,6 +145,7 @@ impl LineIndexer {
         // For sparse index, estimate and scan
         let estimated_byte_pos = (line_num as f64 * self.avg_line_length) as usize;
 
+        // 确定扫描范围
         // Scan backwards to find start of line (in case we landed mid-line)
         // Increase scan radius to handle variance in line lengths and very long lines
         let scan_radius = (self.avg_line_length * 2.0).max(65536.0) as usize;
@@ -160,9 +158,10 @@ impl LineIndexer {
             return None;
         }
 
-        let chunk = reader.get_bytes(scan_start, scan_end);
+        let chunk = reader.get_bytes(scan_start, scan_end); //调用reader
 
         // Find newline before our estimated position
+        // saturating_sub = safe_sub
         let relative_est = estimated_byte_pos.saturating_sub(scan_start);
         let mut line_start = scan_start;
         let mut found_start = false;
@@ -196,6 +195,7 @@ impl LineIndexer {
         Some((line_start, line_end))
     }
 
+    // 也是根据offset 估计 line啊
     pub fn find_line_at_offset(&self, offset: usize) -> usize {
         if self.sample_interval == 0 {
             // Full index

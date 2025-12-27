@@ -10,6 +10,7 @@ pub struct FileReader {
     encoding: &'static Encoding,
 }
 
+// 用来访问 MMAP 的底层API
 impl FileReader {
     pub fn new(path: PathBuf, encoding: &'static Encoding) -> Result<Self> {
         let file = File::open(&path)?;

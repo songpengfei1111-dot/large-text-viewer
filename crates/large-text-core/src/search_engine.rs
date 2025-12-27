@@ -22,6 +22,7 @@ pub struct SearchResult {
     pub match_len: usize,
 }
 
+//用于在多线程中传输部分结果
 pub struct ChunkSearchResult {
     pub matches: Vec<SearchResult>,
 }
@@ -32,6 +33,7 @@ pub enum SearchType {
     Fetch,
 }
 
+// 线程间通信消息
 pub enum SearchMessage {
     ChunkResult(ChunkSearchResult),
     CountResult(usize),
@@ -52,15 +54,16 @@ impl SearchEngine {
             use_regex: false,
             case_sensitive: false,
             regex: None,
-            results: Vec::new(),
+            results: Vec::new(), //返回结果？
             total_results: 0,
         }
     }
 
+    //核心还是用正则Regex去匹配啊
     pub fn set_query(&mut self, query: String, use_regex: bool, case_sensitive: bool) {
         self.query = query;
         self.use_regex = use_regex;
-        self.case_sensitive = case_sensitive;
+        self.case_sensitive = case_sensitive; //啥用？
 
         let pattern = if use_regex {
             if !case_sensitive {
@@ -93,11 +96,7 @@ impl SearchEngine {
         matches
     }
 
-    pub fn count_matches(
-        &self,
-        reader: Arc<FileReader>,
-        tx: SyncSender<SearchMessage>,
-        cancel_token: Arc<AtomicBool>,
+    pub fn count_matches(&self, reader: Arc<FileReader>, tx: SyncSender<SearchMessage>, cancel_token: Arc<AtomicBool>,
     ) {
         let file_len = reader.len();
         if file_len == 0 || self.query.is_empty() {
@@ -106,6 +105,7 @@ impl SearchEngine {
             return;
         }
 
+        // 获取可用cpu数量
         let num_threads = std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(1)
@@ -113,10 +113,12 @@ impl SearchEngine {
 
         let chunk_size = file_len.div_ceil(num_threads);
         let query_len = self.query.len();
+        // 设置重叠区域（overlap）避免跨边界匹配丢失
         let overlap = query_len.saturating_sub(1).max(1000);
 
         let regex = self.regex.clone();
 
+        //激活多个线程对不同分区进行查找
         thread::spawn(move || {
             let mut handles = vec![];
 
@@ -191,13 +193,9 @@ impl SearchEngine {
         });
     }
 
-    pub fn fetch_matches(
-        &self,
-        reader: Arc<FileReader>,
-        tx: SyncSender<SearchMessage>,
-        start_offset: usize,
-        max_results: usize,
-        cancel_token: Arc<AtomicBool>,
+    //获取实际匹配位置
+    pub fn fetch_matches(&self, reader: Arc<FileReader>, tx: SyncSender<SearchMessage>,
+                         start_offset: usize, max_results: usize, cancel_token: Arc<AtomicBool>,
     ) {
         let file_len = reader.len();
         if file_len == 0 || self.query.is_empty() {
@@ -236,6 +234,7 @@ impl SearchEngine {
                     // Define the valid range for starting positions in this chunk
                     // We want to process matches that start in [chunk_start, chunk_end - overlap)
                     // Unless we are at the end of the file, then [chunk_start, chunk_end)
+                    // 重叠处理
                     let valid_end = if chunk_end >= file_len {
                         file_len
                     } else {
