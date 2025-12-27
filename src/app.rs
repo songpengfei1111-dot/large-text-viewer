@@ -13,6 +13,7 @@ use large_text_core::line_indexer::LineIndexer;
 use large_text_core::replacer::{ReplaceMessage, Replacer};
 use large_text_core::search_engine::{SearchEngine, SearchMessage, SearchResult, SearchType};
 
+//这里可以用更复杂一点的结构来增强可读性，或者抽象几个对象来继承
 pub struct TextViewerApp {
     file_reader: Option<Arc<FileReader>>,
     line_indexer: LineIndexer,
@@ -62,7 +63,7 @@ pub struct TextViewerApp {
     // Tail mode
     tail_mode: bool,
     watcher: Option<Box<dyn Watcher>>,
-    file_change_rx: Option<Receiver<()>>,
+    file_change_rx: Option<Receiver<()>>, // 这是什么？
 
     // Status messages
     status_message: String,
@@ -73,7 +74,7 @@ pub struct TextViewerApp {
 
     // Programmatic scroll control
     scroll_to_row: Option<usize>,
-    // Correction for f32 scroll precision issues in large files
+    // Correction for f32 scroll precision issues in large files ？
     scroll_correction: i64,
     pending_scroll_target: Option<usize>,
     last_scroll_offset: f32,
@@ -90,13 +91,14 @@ pub struct TextViewerApp {
     search_count_start_time: Option<std::time::Instant>,
 }
 
-#[derive(Clone)]
+#[derive(Clone)] //？
 struct PendingReplacement {
     offset: usize,
     old_len: usize,
     new_text: String,
 }
 
+//默认初始化结构体
 impl Default for TextViewerApp {
     fn default() -> Self {
         Self {
@@ -153,14 +155,16 @@ impl Default for TextViewerApp {
     }
 }
 
+//主体
 impl TextViewerApp {
     fn open_file(&mut self, path: PathBuf) {
         self.open_start_time = Some(std::time::Instant::now());
         match FileReader::new(path.clone(), self.selected_encoding) {
             Ok(reader) => {
-                self.file_reader = Some(Arc::new(reader));
+                //初始化文件读取器
+                self.file_reader = Some(Arc::new(reader)); //将文件读取器包装在 Arc（原子引用计数）中，以便在多线程环境中安全共享。
                 self.line_indexer
-                    .index_file(self.file_reader.as_ref().unwrap());
+                    .index_file(self.file_reader.as_ref().unwrap()); //索引文件行
                 self.scroll_line = 0;
                 self.scroll_to_row = Some(0); // Reset scroll to top for new file
                 self.status_message = format!("Opened: {}", path.display());
@@ -173,7 +177,7 @@ impl TextViewerApp {
 
                 // Setup file watcher if tail mode is enabled
                 if self.tail_mode {
-                    self.setup_file_watcher();
+                    self.setup_file_watcher(); //有啥用
                 }
             }
             Err(e) => {
@@ -184,9 +188,9 @@ impl TextViewerApp {
 
     fn setup_file_watcher(&mut self) {
         if let Some(ref reader) = self.file_reader {
-            let (tx, rx) = channel();
+            let (tx, rx) = channel(); // 创建一个 MPSC（多生产者单消费者）通道，用于文件变化事件的通信。
             let path = reader.path().clone();
-
+            // 创建文件监视器
             if let Ok(mut watcher) =
                 notify::recommended_watcher(move |res: NotifyResult<notify::Event>| {
                     if let Ok(_event) = res {
@@ -645,7 +649,7 @@ impl TextViewerApp {
         if next_index >= self.search_page_start_index && next_index < page_end_index {
             // In current page
             self.current_result_index = next_index;
-            let local_index = next_index - self.search_page_start_index;
+            let local_index = next_index - self.search_page_start_index; //这里最好加一个聚焦偏移
             let result = &self.search_results[local_index];
             let target_line = self.line_indexer.find_line_at_offset(result.byte_offset);
             self.scroll_line = target_line;
@@ -774,8 +778,8 @@ impl TextViewerApp {
     fn go_to_line(&mut self) {
         if let Ok(line_num) = self.goto_line_input.parse::<usize>() {
             if line_num > 0 && line_num <= self.line_indexer.total_lines() {
-                let target_line = line_num - 1; // 0-indexed
-                                                // Show a few lines of context above the target line for better orientation
+                let target_line = line_num - 5; // 0-indexed
+                // Show a few lines of context above the target line for better orientation
                 self.scroll_line = target_line.saturating_sub(3);
                 self.scroll_to_row = Some(target_line);
                 self.pending_scroll_target = Some(target_line);
@@ -786,6 +790,303 @@ impl TextViewerApp {
         } else {
             self.status_message = "Invalid line number".to_string();
         }
+    }
+
+    // Performance tracking
+    fn handle_first_frame_timing(&mut self) {
+        if let Some(start_time) = self.open_start_time {
+            let elapsed = start_time.elapsed();
+            println!("File opened and first frame rendered in: {:.2?}", elapsed);
+            self.status_message = format!("{} (Rendered in {:.2?})", self.status_message, elapsed);
+            self.open_start_time = None;
+        }
+    }
+
+    // Window title management
+    fn update_window_title(&self, ctx: &egui::Context) {
+        let title = if self.unsaved_changes {
+            "Large Text Viewer *"
+        } else {
+            "Large Text Viewer"
+        };
+        ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.to_string()));
+    }
+
+    // Keyboard shortcuts handling
+    fn handle_keyboard_shortcuts(&mut self, ctx: &egui::Context) {
+        // Ctrl+S / Cmd+S: Save file
+        if ctx.input_mut(|i| {
+            i.consume_key(egui::Modifiers::CTRL, egui::Key::S)
+                || i.consume_key(egui::Modifiers::MAC_CMD, egui::Key::S)
+        }) {
+            self.save_file();
+        }
+
+        // Ctrl+R / Cmd+R: Toggle replace
+        if ctx.input_mut(|i| {
+            i.consume_key(egui::Modifiers::CTRL, egui::Key::R)
+                || i.consume_key(egui::Modifiers::MAC_CMD, egui::Key::R)
+        }) {
+            self.show_search_bar = true;
+            self.show_replace = !self.show_replace;
+        }
+
+        // Ctrl+F / Cmd+F: Toggle search
+        if ctx.input_mut(|i| {
+            i.consume_key(egui::Modifiers::CTRL, egui::Key::F)
+                || i.consume_key(egui::Modifiers::MAC_CMD, egui::Key::F)
+        }) {
+            self.show_search_bar = !self.show_search_bar;
+            if self.show_search_bar {
+                self.focus_search_input = true;
+            }
+        }
+    }
+
+    // Theme management
+    fn apply_theme(&self, ctx: &egui::Context) {
+        if self.dark_mode {
+            ctx.set_visuals(egui::Visuals::dark());
+        } else {
+            ctx.set_visuals(egui::Visuals::light());
+        }
+    }
+
+    // Background tasks polling
+    fn poll_background_tasks(&mut self, ctx: &egui::Context) {
+        // Check for file changes in tail mode
+        if self.tail_mode {
+            self.check_file_changes();
+            ctx.request_repaint(); // Keep refreshing
+        }
+
+        // Poll search and replace results
+        self.poll_search_results();
+        self.poll_replace_results();
+
+        // Keep UI responsive during long operations
+        if self.search_in_progress || self.replace_in_progress {
+            ctx.request_repaint(); // Keep spinner animated
+        }
+    }
+
+    // Render all UI components
+    fn render_ui(&mut self, ctx: &egui::Context) {
+        // Render panels first (order matters for layout)
+        self.render_menu_bar(ctx);
+        self.render_status_bar(ctx);
+        self.render_toolbar(ctx);
+        self.render_search_results_bar(ctx);
+
+        // CentralPanel must be rendered last to occupy remaining space
+        self.render_text_area(ctx);
+
+        // Windows can be rendered anytime (they float above)
+        self.render_encoding_selector(ctx);
+        self.render_file_info(ctx);
+    }
+
+    //ui
+    fn render_search_results_bar(&mut self, ctx: &egui::Context) {
+        if !self.show_search_bar {
+            return;
+        }
+        egui::SidePanel::left("search_results")
+            .default_width(400.0)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.heading("Find Results");
+
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("✖").clicked() {
+                            self.show_search_bar = false;
+                        }
+                    });
+                });
+
+                ui.separator();
+
+                // 显示搜索统计信息 - 参考格式："Found 20320 occurrences of '0xf00f9344'"
+                if self.search_in_progress {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        if self.total_search_results > 0 {
+                            ui.label(format!(
+                                "Found {} occurrences of '{}'...",
+                                self.total_search_results, self.search_query
+                            ));
+                        } else {
+                            ui.label("Searching...");
+                        }
+                    });
+                } else if self.total_search_results > 0 {
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "Found {} occurrences of '{}'.",
+                            self.total_search_results, self.search_query
+                        ))
+                            .strong(),
+                    );
+                } else if !self.search_query.is_empty() {
+                    ui.label("No matches found");
+                }
+
+                ui.separator();
+
+                // 使用虚拟滚动显示搜索结果列表
+                if let Some(ref reader) = self.file_reader {
+                    let text_height = ui.text_style_height(&egui::TextStyle::Monospace);
+
+                    egui::ScrollArea::both()
+                        .auto_shrink([false; 2])
+                        .show_rows(
+                            ui,
+                            text_height,
+                            self.search_results.len(),
+                            |ui, row_range| {
+                                for idx in row_range {
+                                    if idx >= self.search_results.len() {
+                                        break;
+                                    }
+
+                                    let result = &self.search_results[idx];
+                                    let global_idx = self.search_page_start_index + idx;
+                                    let is_current = global_idx == self.current_result_index;
+
+                                    // 只在需要时读取行内容（懒加载）
+                                    let line_num = self.line_indexer.find_line_at_offset(result.byte_offset);
+
+                                    // 优化：只读取匹配周围的上下文，而不是整行
+                                    // 这样即使行很长也不会卡顿
+                                    let context_size = 500; // 匹配前后各读取 500 字节
+                                    let read_start = result.byte_offset.saturating_sub(context_size);
+                                    let read_end = (result.byte_offset + result.match_len + context_size).min(reader.len());
+
+                                    let chunk = reader.get_chunk(read_start, read_end);
+
+                                    // 找到匹配在 chunk 中的位置
+                                    let match_offset_in_chunk = result.byte_offset - read_start;
+
+                                    // 提取一行文本（从换行符到换行符）
+                                    let line_start_in_chunk = chunk[..match_offset_in_chunk]
+                                        .rfind('\n')
+                                        .map(|pos| pos + 1)
+                                        .unwrap_or(0);
+
+                                    let line_end_in_chunk = chunk[match_offset_in_chunk..]
+                                        .find('\n')
+                                        .map(|pos| match_offset_in_chunk + pos)
+                                        .unwrap_or(chunk.len());
+
+                                    let line_text = &chunk[line_start_in_chunk..line_end_in_chunk];
+
+                                    // 匹配在 line_text 中的位置
+                                    let match_start_in_line = match_offset_in_chunk - line_start_in_chunk;
+                                    let match_end_in_line = match_start_in_line + result.match_len;
+
+                                    // 构建带高亮的文本
+                                    let mut job = egui::text::LayoutJob::default();
+                                    job.wrap.max_width = f32::INFINITY; // 禁止换行
+
+                                    // 行内容颜色
+                                    let text_color = if self.dark_mode {
+                                        egui::Color32::LIGHT_GRAY
+                                    } else {
+                                        egui::Color32::BLACK
+                                    };
+
+                                    let highlight_bg = if is_current {
+                                        if self.dark_mode {
+                                            egui::Color32::from_rgb(80, 80, 120)
+                                        } else {
+                                            egui::Color32::from_rgb(200, 200, 255)
+                                        }
+                                    } else {
+                                        if self.dark_mode {
+                                            egui::Color32::from_rgb(60, 60, 40)
+                                        } else {
+                                            egui::Color32::from_rgb(255, 255, 200)
+                                        }
+                                    };
+
+                                    // Line number - 参考格式："Line 25906976"
+                                    job.append(
+                                        &format!("Line {:8}    ", line_num + 1),
+                                        0.0,
+                                        egui::TextFormat {
+                                            font_id: egui::FontId::monospace(self.font_size),
+                                            color: if self.dark_mode {
+                                                egui::Color32::GRAY
+                                            } else {
+                                                egui::Color32::DARK_GRAY
+                                            },
+                                            ..Default::default()
+                                        },
+                                    );
+
+                                    // 安全地分割文本
+                                    let safe_start = match_start_in_line.min(line_text.len());
+                                    let safe_end = match_end_in_line.min(line_text.len());
+
+                                    // 匹配前的文本
+                                    if safe_start > 0 {
+                                        job.append(
+                                            &line_text[..safe_start],
+                                            0.0,
+                                            egui::TextFormat {
+                                                font_id: egui::FontId::monospace(self.font_size),
+                                                color: text_color,
+                                                ..Default::default()
+                                            },
+                                        );
+                                    }
+
+                                    // 匹配的文本（高亮）
+                                    if safe_start < safe_end && safe_end <= line_text.len() {
+                                        job.append(
+                                            &line_text[safe_start..safe_end],
+                                            0.0,
+                                            egui::TextFormat {
+                                                font_id: egui::FontId::monospace(self.font_size),
+                                                color: if self.dark_mode {
+                                                    egui::Color32::WHITE
+                                                } else {
+                                                    egui::Color32::BLACK
+                                                },
+                                                background: highlight_bg,
+                                                ..Default::default()
+                                            },
+                                        );
+                                    }
+
+                                    // 匹配后的文本
+                                    if safe_end < line_text.len() {
+                                        job.append(
+                                            &line_text[safe_end..],
+                                            0.0,
+                                            egui::TextFormat {
+                                                font_id: egui::FontId::monospace(self.font_size),
+                                                color: text_color,
+                                                ..Default::default()
+                                            },
+                                        );
+                                    }
+
+                                    let response = ui.selectable_label(is_current, job);
+
+                                    // 点击跳转到该结果
+                                    if response.clicked() {
+                                        self.current_result_index = global_idx;
+                                        let target_line = self.line_indexer.find_line_at_offset(result.byte_offset);
+                                        self.scroll_line = target_line;
+                                        self.scroll_to_row = Some(target_line);
+                                        self.pending_scroll_target = Some(target_line);
+                                    }
+                                }
+                            },
+                        );
+                }
+            });
     }
 
     fn render_menu_bar(&mut self, ctx: &egui::Context) {
@@ -881,11 +1182,12 @@ impl TextViewerApp {
         });
     }
 
+    //综合tool_bar, 包含了下面所有的
     fn render_toolbar(&mut self, ctx: &egui::Context) {
         if !self.show_search_bar {
             return;
         }
-        egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
+        egui::TopBottomPanel::bottom("toolbar").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.label("Search:");
                 let response =
@@ -1041,16 +1343,16 @@ impl TextViewerApp {
                 } else {
                     egui::ScrollArea::both()
                 }
-                // Tie scroll memory to the current file path so new files start at the top
-                .id_salt(
-                    self.file_reader
-                        .as_ref()
-                        .map(|r| r.path().display().to_string())
-                        .unwrap_or_else(|| "no_file".to_string()),
-                )
-                .auto_shrink([false, false])
-                .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible)
-                .drag_to_scroll(true);
+                    // Tie scroll memory to the current file path so new files start at the top
+                    .id_salt(
+                        self.file_reader
+                            .as_ref()
+                            .map(|r| r.path().display().to_string())
+                            .unwrap_or_else(|| "no_file".to_string()),
+                    )
+                    .auto_shrink([false, false])
+                    .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible)
+                    .drag_to_scroll(true);
 
                 // Apply programmatic scroll if requested
                 let mut programmatic_scroll = false;
@@ -1389,63 +1691,26 @@ impl TextViewerApp {
     }
 }
 
+//绑定数据结构
 impl eframe::App for TextViewerApp {
+    // 每帧更新
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        if let Some(start_time) = self.open_start_time {
-            let elapsed = start_time.elapsed();
-            println!("File opened and first frame rendered in: {:.2?}", elapsed);
-            self.status_message = format!("{} (Rendered in {:.2?})", self.status_message, elapsed);
-            self.open_start_time = None;
-        }
+        // Performance tracking
+        self.handle_first_frame_timing();
 
-        // Update window title
-        let title = if self.unsaved_changes {
-            "Large Text Viewer *"
-        } else {
-            "Large Text Viewer"
-        };
-        ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.to_string()));
+        // Update window title based on unsaved changes
+        self.update_window_title(ctx);
 
         // Handle keyboard shortcuts
-        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::S)) {
-            self.save_file();
-        }
-        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::R)) {
-            self.show_search_bar = true;
-            self.show_replace = !self.show_replace;
-        }
-        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::F)) {
-            self.show_search_bar = !self.show_search_bar;
-            if self.show_search_bar {
-                self.focus_search_input = true;
-            }
-        }
+        self.handle_keyboard_shortcuts(ctx);
 
-        // Set theme
-        if self.dark_mode {
-            ctx.set_visuals(egui::Visuals::dark());
-        } else {
-            ctx.set_visuals(egui::Visuals::light());
-        }
+        // Apply theme
+        self.apply_theme(ctx);
 
-        // Check for file changes in tail mode
-        if self.tail_mode {
-            self.check_file_changes();
-            ctx.request_repaint(); // Keep refreshing
-        }
+        // Poll background tasks (file changes, search, replace)
+        self.poll_background_tasks(ctx);
 
-        self.poll_search_results();
-        self.poll_replace_results();
-
-        if self.search_in_progress || self.replace_in_progress {
-            ctx.request_repaint(); // Keep spinner animated during long searches
-        }
-
-        self.render_menu_bar(ctx);
-        self.render_toolbar(ctx);
-        self.render_status_bar(ctx);
-        self.render_text_area(ctx);
-        self.render_encoding_selector(ctx);
-        self.render_file_info(ctx);
+        // Render all UI components
+        self.render_ui(ctx);
     }
 }

@@ -71,6 +71,7 @@ impl LineIndexer {
         self.sample_interval = SPARSE_SAMPLE_SIZE;
 
         let mut pos = 0;
+        //TODO change this for bigger
         let sample_count_limit = 100; // Limit to 100 samples max
         let mut sample_count = 0;
 
