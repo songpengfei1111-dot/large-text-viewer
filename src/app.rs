@@ -1085,7 +1085,7 @@ impl TextViewerApp {
                         // and then read sequentially.
                         let mut current_offset = if let Some((start, _)) = self
                             .line_indexer
-                            .get_line_with_reader(corrected_start_line, reader)
+                            .get_line_range(corrected_start_line)
                         {
                             start
                         } else {

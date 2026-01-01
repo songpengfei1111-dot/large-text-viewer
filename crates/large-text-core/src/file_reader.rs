@@ -1,6 +1,7 @@
 use anyhow::Result;
 use encoding_rs::{Encoding, UTF_16BE, UTF_16LE, UTF_8, WINDOWS_1252};
 use memmap2::Mmap;
+use rayon::prelude::*;
 use std::fs::File;
 use std::path::PathBuf;
 
@@ -17,7 +18,19 @@ impl FileReader {
         if metadata.len() == 0 {
             anyhow::bail!("Cannot memory-map an empty file: {:?}", path);
         }
-        let mmap = unsafe { Mmap::map(&file)? };
+        
+        let mmap = unsafe {
+            let mmap = Mmap::map(&file)?;
+            #[cfg(unix)]
+            {
+                libc::madvise(
+                    mmap.as_ptr() as *mut libc::c_void,
+                    mmap.len(),
+                    libc::MADV_SEQUENTIAL | libc::MADV_WILLNEED,
+                );
+            }
+            mmap
+        };
 
         Ok(Self {
             mmap,
@@ -63,6 +76,102 @@ impl FileReader {
 
     pub fn all_data(&self) -> &[u8] {
         &self.mmap[..]
+    }
+
+    /// 最快版本：32字节展开 + 并行处理
+    pub fn find_line_offsets(&self) -> Vec<usize> {
+        let data = self.all_data();
+        let len = data.len();
+
+        if len == 0 {
+            return vec![0];
+        }
+
+        let num_threads = rayon::current_num_threads();
+        let chunk_size = len / num_threads;
+
+        let chunk_results: Vec<Vec<usize>> = (0..num_threads)
+            .into_par_iter()
+            .map(|thread_id| {
+                let chunk_start = thread_id * chunk_size;
+                let chunk_end = if thread_id == num_threads - 1 {
+                    len
+                } else {
+                    (thread_id + 1) * chunk_size
+                };
+
+                let chunk = &data[chunk_start..chunk_end];
+                let chunk_len = chunk.len();
+                let mut local_offsets = Vec::with_capacity(chunk_len / 65);
+
+                if thread_id == 0 {
+                    local_offsets.push(0);
+                }
+
+                let mut i = 0;
+
+                // 32字节对齐处理 - 完全展开
+                while i + 32 <= chunk_len {
+                    unsafe {
+                        let ptr = chunk.as_ptr().add(i);
+                        let bytes = std::ptr::read_unaligned(ptr as *const [u8; 32]);
+
+                        if bytes[0] == b'\n' { local_offsets.push(chunk_start + i + 1); }
+                        if bytes[1] == b'\n' { local_offsets.push(chunk_start + i + 2); }
+                        if bytes[2] == b'\n' { local_offsets.push(chunk_start + i + 3); }
+                        if bytes[3] == b'\n' { local_offsets.push(chunk_start + i + 4); }
+                        if bytes[4] == b'\n' { local_offsets.push(chunk_start + i + 5); }
+                        if bytes[5] == b'\n' { local_offsets.push(chunk_start + i + 6); }
+                        if bytes[6] == b'\n' { local_offsets.push(chunk_start + i + 7); }
+                        if bytes[7] == b'\n' { local_offsets.push(chunk_start + i + 8); }
+                        if bytes[8] == b'\n' { local_offsets.push(chunk_start + i + 9); }
+                        if bytes[9] == b'\n' { local_offsets.push(chunk_start + i + 10); }
+                        if bytes[10] == b'\n' { local_offsets.push(chunk_start + i + 11); }
+                        if bytes[11] == b'\n' { local_offsets.push(chunk_start + i + 12); }
+                        if bytes[12] == b'\n' { local_offsets.push(chunk_start + i + 13); }
+                        if bytes[13] == b'\n' { local_offsets.push(chunk_start + i + 14); }
+                        if bytes[14] == b'\n' { local_offsets.push(chunk_start + i + 15); }
+                        if bytes[15] == b'\n' { local_offsets.push(chunk_start + i + 16); }
+                        if bytes[16] == b'\n' { local_offsets.push(chunk_start + i + 17); }
+                        if bytes[17] == b'\n' { local_offsets.push(chunk_start + i + 18); }
+                        if bytes[18] == b'\n' { local_offsets.push(chunk_start + i + 19); }
+                        if bytes[19] == b'\n' { local_offsets.push(chunk_start + i + 20); }
+                        if bytes[20] == b'\n' { local_offsets.push(chunk_start + i + 21); }
+                        if bytes[21] == b'\n' { local_offsets.push(chunk_start + i + 22); }
+                        if bytes[22] == b'\n' { local_offsets.push(chunk_start + i + 23); }
+                        if bytes[23] == b'\n' { local_offsets.push(chunk_start + i + 24); }
+                        if bytes[24] == b'\n' { local_offsets.push(chunk_start + i + 25); }
+                        if bytes[25] == b'\n' { local_offsets.push(chunk_start + i + 26); }
+                        if bytes[26] == b'\n' { local_offsets.push(chunk_start + i + 27); }
+                        if bytes[27] == b'\n' { local_offsets.push(chunk_start + i + 28); }
+                        if bytes[28] == b'\n' { local_offsets.push(chunk_start + i + 29); }
+                        if bytes[29] == b'\n' { local_offsets.push(chunk_start + i + 30); }
+                        if bytes[30] == b'\n' { local_offsets.push(chunk_start + i + 31); }
+                        if bytes[31] == b'\n' { local_offsets.push(chunk_start + i + 32); }
+                    }
+                    i += 32;
+                }
+
+                // 处理剩余字节
+                while i < chunk_len {
+                    if chunk[i] == b'\n' {
+                        local_offsets.push(chunk_start + i + 1);
+                    }
+                    i += 1;
+                }
+
+                local_offsets
+            })
+            .collect();
+
+        let total_size: usize = chunk_results.iter().map(|v| v.len()).sum();
+        let mut line_offsets = Vec::with_capacity(total_size);
+
+        for chunk_result in chunk_results {
+            line_offsets.extend(chunk_result);
+        }
+
+        line_offsets
     }
 }
 
