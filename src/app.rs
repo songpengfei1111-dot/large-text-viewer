@@ -95,8 +95,8 @@ impl MiniMapRenderer {
         let available_height = rect.height() - 20.0; // 留出边距
         let line_height = available_height / actual_range as f32;
 
-        // 渲染文本行 - 使用更细的字体
-        let mini_font_size = 3.0;
+        // 渲染文本行 - 使用等宽字体确保长宽一致
+        let mini_font_size = (font_size * 0.25).max(4.0); // 稍微增大字体以保证可读性
         let text_color = egui::Color32::from_gray(150);
         let current_viewport_color = egui::Color32::from_gray(200);
 
@@ -115,20 +115,20 @@ impl MiniMapRenderer {
                         .trim_end_matches('\n')
                         .trim_end_matches('\r')
                         .chars()
-                        .take(200)
+                        .take(80) // 减少到80个字符，确保在minimap宽度内显示完整
                         .collect::<String>();
 
                     // 判断是否在当前视口内
                     let is_in_viewport = line_num >= current_line && line_num < current_line + visible_lines;
                     let color = if is_in_viewport { current_viewport_color } else { text_color };
 
-                    // 直接绘制文本内容（不显示行号）
+                    // 使用等宽字体绘制文本内容，确保字符长宽一致
                     if !trimmed.is_empty() {
                         painter.text(
                             egui::pos2(rect.left() + 5.0, y_pos),
                             egui::Align2::LEFT_TOP,
                             trimmed,
-                            egui::FontId::monospace(mini_font_size),
+                            egui::FontId::monospace(mini_font_size), // 确保使用等宽字体
                             color,
                         );
                     }
@@ -356,6 +356,11 @@ struct ScrollState {
     drag_target_row: Option<usize>,
     drag_grab_offset_px: Option<f32>,
     drag_last_commit: Option<Instant>,
+    // 添加动画相关字段
+    animation_start_line: Option<usize>,
+    animation_target_line: Option<usize>,
+    animation_start_time: Option<Instant>,
+    animation_duration: Duration,
 }
 
 impl Default for ScrollState {
@@ -368,6 +373,10 @@ impl Default for ScrollState {
             drag_target_row: None,
             drag_grab_offset_px: None,
             drag_last_commit: None,
+            animation_start_line: None,
+            animation_target_line: None,
+            animation_start_time: None,
+            animation_duration: Duration::from_millis(300), // 300ms动画时长
         }
     }
 }
@@ -380,6 +389,49 @@ impl ScrollState {
         self.drag_target_row = None;
         self.drag_grab_offset_px = None;
         self.drag_last_commit = None;
+        self.animation_start_line = None;
+        self.animation_target_line = None;
+        self.animation_start_time = None;
+    }
+
+    /// 开始流畅滑动动画
+    fn start_smooth_scroll(&mut self, target_line: usize) {
+        self.animation_start_line = Some(self.line);
+        self.animation_target_line = Some(target_line);
+        self.animation_start_time = Some(Instant::now());
+    }
+
+    /// 更新动画状态，返回是否需要继续动画
+    fn update_animation(&mut self) -> bool {
+        if let (Some(start_line), Some(target_line), Some(start_time)) = 
+            (self.animation_start_line, self.animation_target_line, self.animation_start_time) {
+            
+            let elapsed = start_time.elapsed();
+            if elapsed >= self.animation_duration {
+                // 动画结束
+                self.line = target_line;
+                self.animation_start_line = None;
+                self.animation_target_line = None;
+                self.animation_start_time = None;
+                return false;
+            }
+
+            // 使用easeInOutCubic缓动函数
+            let progress = elapsed.as_secs_f32() / self.animation_duration.as_secs_f32();
+            let eased_progress = if progress < 0.5 {
+                4.0 * progress * progress * progress
+            } else {
+                1.0 - (-2.0 * progress + 2.0).powi(3) / 2.0
+            };
+
+            // 计算当前位置
+            let distance = target_line as f32 - start_line as f32;
+            let current_pos = start_line as f32 + distance * eased_progress;
+            self.line = current_pos.round() as usize;
+
+            return true;
+        }
+        false
     }
 }
 
@@ -1406,8 +1458,8 @@ impl TextViewerApp {
                     reader,
                     &self.line_indexer,
                 ) {
-                    // 使用过渡滑动效果，而不是直接跳转
-                    self.scroll.to_row = Some(target_line);
+                    // 使用流畅滑动效果
+                    self.scroll.start_smooth_scroll(target_line);
                 }
             }
         }
@@ -1927,6 +1979,12 @@ impl eframe::App for TextViewerApp {
 
         self.poll_search_results();
         self.poll_replace_results();
+
+        // 更新滑动动画
+        let animation_active = self.scroll.update_animation();
+        if animation_active {
+            ctx.request_repaint(); // 动画进行中时请求重绘
+        }
 
         if self.search.in_progress || self.replace.in_progress {
             ctx.request_repaint();
