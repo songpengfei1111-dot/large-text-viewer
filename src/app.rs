@@ -1038,7 +1038,7 @@ impl TextViewerApp {
                 return;
             };
 
-            let available_height = ui.available_height();
+            let available_height = ui.available_height(); //窗口高度
             let font_id = egui::FontId::monospace(self.font_size);
             let line_height = ui.fonts(|f| f.row_height(&font_id));
             self.visible_lines = ((available_height / line_height).ceil() as usize).saturating_add(2);
