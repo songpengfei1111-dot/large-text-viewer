@@ -1438,7 +1438,7 @@ impl TextViewerApp {
     }
 
     fn render_file_content(&mut self, ui: &mut egui::Ui) {
-        let font_id = egui::FontId::monospace(self.view.font_size);
+        let font_id = egui::FontId::monospace(self.view.font_size); //字体
         let line_height = ui.fonts(|f| f.row_height(&font_id));
         let total_lines = self.line_indexer.total_lines();
 
@@ -1528,23 +1528,6 @@ impl TextViewerApp {
         );
         
         (content_rect, scrollbar_rect, minimap_rect)
-    }
-
-    fn calculate_layout_rects(
-        &self,
-        available_rect: egui::Rect,
-        scrollbar_width: f32,
-    ) -> (egui::Rect, egui::Rect) {
-        let scrollbar_width = scrollbar_width.min(available_rect.width().max(0.0));
-        let scrollbar_rect = egui::Rect::from_min_max(
-            egui::pos2(available_rect.right() - scrollbar_width, available_rect.top()),
-            egui::pos2(available_rect.right(), available_rect.bottom()),
-        );
-        let content_rect = egui::Rect::from_min_max(
-            available_rect.left_top(),
-            egui::pos2(scrollbar_rect.left(), available_rect.bottom()),
-        );
-        (content_rect, scrollbar_rect)
     }
 
     fn render_scrollbar(
@@ -2024,3 +2007,4 @@ impl eframe::App for TextViewerApp {
         self.render_text_area(ctx);
     }
 }
+
