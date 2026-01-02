@@ -1064,6 +1064,17 @@ impl TextViewerApp {
             
             let virtual_total_height = (real_total_height * self.scroll_scale_factor).min(MAX_VIRTUAL_HEIGHT) as f32;
 
+            if self.scroll_scale_factor < 1.0 {
+                let scroll_multiplier = (1.0 / self.scroll_scale_factor).sqrt().clamp(1.0, 10.0);
+                ctx.options_mut(|options| {
+                    options.line_scroll_speed = 40.0 * scroll_multiplier as f32;
+                });
+            } else {
+                ctx.options_mut(|options| {
+                    options.line_scroll_speed = 40.0;
+                });
+            }
+
             let mut scroll_area = egui::ScrollArea::both()
                 .id_salt(
                     self.file_reader
