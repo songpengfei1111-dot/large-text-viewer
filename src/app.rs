@@ -70,7 +70,7 @@ impl MiniMapRenderer {
         painter.rect_stroke(rect, 2.0, egui::Stroke::new(1.0, egui::Color32::from_gray(60)));
 
         // 计算minimap显示范围：当前视口的15倍（增加缓存范围）
-        let minimap_range = visible_lines * 15;
+        let minimap_range = visible_lines * 7;
         let half_range = minimap_range / 2;
         
         // 计算起始和结束行，确保在文件范围内
@@ -96,9 +96,9 @@ impl MiniMapRenderer {
         let line_height = available_height / actual_range as f32;
 
         // 渲染文本行 - 使用更细的字体
-        let mini_font_size = 0.1;
+        let mini_font_size = 3.0;
         let text_color = egui::Color32::from_gray(150);
-        let current_viewport_color = egui::Color32::from_gray(100);
+        let current_viewport_color = egui::Color32::from_gray(200);
 
         if let Some(ref cached_chunk) = self.cached_chunk {
             for line_num in start_line..end_line {
@@ -115,7 +115,7 @@ impl MiniMapRenderer {
                         .trim_end_matches('\n')
                         .trim_end_matches('\r')
                         .chars()
-                        .take(40)
+                        .take(200)
                         .collect::<String>();
 
                     // 判断是否在当前视口内
