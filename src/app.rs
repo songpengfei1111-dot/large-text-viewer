@@ -1,4 +1,5 @@
 use eframe::egui;
+use eframe::egui::NumExt;
 use encoding_rs::Encoding;
 use notify::{RecursiveMode, Result as NotifyResult, Watcher};
 use std::path::PathBuf;
@@ -73,6 +74,10 @@ pub struct TextViewerApp {
 
     // Programmatic scroll control
     scroll_to_row: Option<usize>,
+    // Correction for f32 scroll precision issues in large files
+    scroll_correction: i64,
+    pending_scroll_target: Option<usize>,
+    last_scroll_offset: f32,
 
     // Focus control
     focus_search_input: bool,
@@ -138,6 +143,9 @@ impl Default for TextViewerApp {
             show_encoding_selector: false,
             focus_search_input: false,
             scroll_to_row: None,
+            scroll_correction: 0,
+            pending_scroll_target: None,
+            last_scroll_offset: 0.0,
             unsaved_changes: false,
             pending_replacements: Vec::new(),
             open_start_time: None,
@@ -643,6 +651,7 @@ impl TextViewerApp {
             let target_line = self.line_indexer.find_line_at_offset(result.byte_offset);
             self.scroll_line = target_line;
             self.scroll_to_row = Some(target_line);
+            self.pending_scroll_target = Some(target_line);
         } else {
             // Need to fetch next page
             // If we are wrapping around to 0
@@ -692,6 +701,7 @@ impl TextViewerApp {
             let target_line = self.line_indexer.find_line_at_offset(result.byte_offset);
             self.scroll_line = target_line;
             self.scroll_to_row = Some(target_line);
+            self.pending_scroll_target = Some(target_line);
         } else {
             // Need to fetch previous page (or last page if wrapping)
             if prev_index == self.total_search_results - 1 {
@@ -766,9 +776,10 @@ impl TextViewerApp {
         if let Ok(line_num) = self.goto_line_input.parse::<usize>() {
             if line_num > 0 && line_num <= self.line_indexer.total_lines() {
                 let target_line = line_num - 1; // 0-indexed
-                // Show a few lines of context above the target line for better orientation
+                                                // Show a few lines of context above the target line for better orientation
                 self.scroll_line = target_line.saturating_sub(3);
                 self.scroll_to_row = Some(target_line);
+                self.pending_scroll_target = Some(target_line);
                 self.status_message = format!("Jumped to line {}", line_num);
             } else {
                 self.status_message = "Line number out of range".to_string();
@@ -1020,7 +1031,7 @@ impl TextViewerApp {
     fn render_text_area(&mut self, ctx: &egui::Context) {
         egui::CentralPanel::default().show(ctx, |ui| {
             if let Some(ref reader) = self.file_reader {
-                let _available_height = ui.available_height();
+                let available_height = ui.available_height();
                 let font_id = egui::FontId::monospace(self.font_size);
                 let line_height = ui.fonts(|f| f.row_height(&font_id));
                 // self.visible_lines = ((available_height / line_height).ceil() as usize).saturating_add(2);
@@ -1039,37 +1050,111 @@ impl TextViewerApp {
                 .drag_to_scroll(true).enable_scrolling(true).animated(true);
 
                 // Apply programmatic scroll if requested
+                let mut programmatic_scroll = false;
                 if let Some(target_row) = self.scroll_to_row.take() {
-                    println!("step1");
                     scroll_area =
                         scroll_area.vertical_scroll_offset(target_row as f32 * line_height);
+                    programmatic_scroll = true;
                 }
 
                 let mut first_visible_row = None;
+                let total_lines = self.line_indexer.total_lines();
 
-                // show_rows 已经实现了虚拟滚动：只渲染可见区域的行
-                // total_lines 用于设置滚动区域的总高度，row_range 是实际需要渲染的行范围
-                let _output = scroll_area.show_rows(
-                    ui,
-                    line_height,
-                    self.line_indexer.total_lines(),
-                    |ui, row_range| {
-                        // 记录第一个可见行
-                        if first_visible_row.is_none() {
-                            first_visible_row = Some(row_range.start);
-                        }
+                // 使用 show_viewport 而不是 show_rows，以便更好地控制大文件渲染
+                let output = scroll_area.show_viewport(ui, |ui, viewport| {
+                    // 设置内容总高度，但限制最大值以避免 f32 精度问题
+                    let spacing = ui.spacing().item_spacing.y;
+                    let row_height_with_spacing = line_height + spacing;
+                    let total_height = (row_height_with_spacing * total_lines as f32 - spacing)
+                        .at_least(0.0)
+                        .min(1e8); // 限制最大高度为 1 亿像素，避免 f32 精度损失
+                    
+                    ui.set_height(total_height);
 
-                        // 直接使用 egui 提供的 row_range，不要重新计算
-                        for line_num in row_range.clone() {
-                            // 使用 line_indexer 获取该行的字节范围
-                            let (start, end) = if let Some(range) = self.line_indexer.get_line_range(line_num) {
-                                range
-                            } else {
-                                // 如果行号超出范围，跳过
-                                continue;
-                            };
+                    // 根据 viewport 计算可见行范围
+                    let mut min_row = (viewport.min.y / row_height_with_spacing).floor() as usize;
+                    let mut max_row = (viewport.max.y / row_height_with_spacing).ceil() as usize + 1;
+                    
+                    // 确保范围有效
+                    min_row = min_row.min(total_lines);
+                    max_row = max_row.min(total_lines);
+                    
+                    // 如果范围太小，确保至少渲染一些行
+                    if max_row <= min_row && min_row < total_lines {
+                        max_row = (min_row + self.visible_lines).min(total_lines);
+                    }
 
-                            // 读取该行的内容
+                    // Calculate scroll correction if we just jumped
+                    if let Some(target) = self.pending_scroll_target.take() {
+                        self.scroll_correction = target as i64 - min_row as i64;
+                    }
+
+                    // Apply correction to find the actual start line we want to render
+                    let corrected_start_line =
+                        (min_row as i64 + self.scroll_correction).max(0) as usize;
+                    let corrected_end_line = corrected_start_line + (max_row - min_row);
+
+                    // Capture the first visible row (corrected)
+                    if first_visible_row.is_none() {
+                        first_visible_row = Some(corrected_start_line);
+                    }
+
+                    // 计算渲染区域的位置
+                    let y_min = ui.max_rect().top() + corrected_start_line as f32 * row_height_with_spacing;
+                    let y_max = ui.max_rect().top() + corrected_end_line as f32 * row_height_with_spacing;
+                    let rect = egui::Rect::from_x_y_ranges(ui.max_rect().x_range(), y_min..=y_max);
+
+                    // 在指定位置分配 UI 空间并渲染
+                    ui.allocate_new_ui(egui::UiBuilder::new().max_rect(rect), |viewport_ui| {
+                        viewport_ui.skip_ahead_auto_ids(corrected_start_line); // 确保 ID 一致性
+
+                        // For contiguous rendering, we find the start offset of the first line
+                        // and then read sequentially.
+                        let mut current_offset = if let Some((start, _)) = self
+                            .line_indexer
+                            .get_line_range(corrected_start_line)
+                        {
+                            start
+                        } else {
+                            return;
+                        };
+
+                        let render_range = corrected_start_line..corrected_end_line.min(total_lines);
+
+                        for line_num in render_range {
+                            // Read line starting at current_offset
+                            // We need to find the end of the line
+                            let chunk_size = 4096; // Read in chunks to find newline
+                            let mut line_end = current_offset;
+                            let mut found_newline = false;
+
+                            // Scan for newline
+                            while !found_newline {
+                                let chunk = reader.get_bytes(line_end, line_end + chunk_size);
+                                if chunk.is_empty() {
+                                    break;
+                                }
+
+                                if let Some(pos) = chunk.iter().position(|&b| b == b'\n') {
+                                    line_end += pos + 1; // Include newline
+                                    found_newline = true;
+                                } else {
+                                    line_end += chunk.len();
+                                }
+
+                                if line_end >= reader.len() {
+                                    break;
+                                }
+                            }
+
+                            let start = current_offset;
+                            let end = line_end;
+                            current_offset = end; // Next line starts here
+
+                            if start >= reader.len() {
+                                break;
+                            }
+
                             let mut line_text_owned = reader.get_chunk(start, end);
 
                             // Apply pending replacements to the view
@@ -1147,7 +1232,7 @@ impl TextViewerApp {
                                 }
                             }
 
-                            ui.horizontal(|ui| {
+                            viewport_ui.horizontal(|ui| {
                                 if self.show_line_numbers {
                                     let ln_text =
                                         egui::RichText::new(format!("{:6} ", line_num + 1))
@@ -1249,8 +1334,17 @@ impl TextViewerApp {
                                 label.surrender_focus();
                             });
                         }
-                    },
-                );
+                    })
+                });
+
+                // Check for manual scroll
+                let current_offset = output.state.offset.y;
+                if !programmatic_scroll && (current_offset - self.last_scroll_offset).abs() > 1.0 {
+                    // Manual scroll detected (drag or wheel)
+                    // Reset correction as user is establishing new position
+                    self.scroll_correction = 0;
+                }
+                self.last_scroll_offset = current_offset;
 
                 // Update scroll_line to match what was actually displayed
                 if let Some(first_row) = first_visible_row {
