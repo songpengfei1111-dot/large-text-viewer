@@ -1355,41 +1355,8 @@ impl TextViewerApp {
                 return;
             }
 
-            // 如果启用了minimap，使用侧边面板布局
-            if self.view.show_minimap {
-                egui::SidePanel::right("minimap_panel")
-                    .resizable(true)
-                    .default_width(self.minimap.width())
-                    .width_range(150.0..=400.0)
-                    .show_inside(ui, |ui| {
-                        if let Some(ref reader) = self.file_reader {
-                            let minimap_rect = ui.available_rect_before_wrap();
-                            
-                            // 渲染minimap并处理点击
-                            if let Some(target_line) = self.minimap.render(
-                                ui,
-                                minimap_rect,
-                                self.scroll.line,
-                                self.scroll.visible_lines,
-                                self.line_indexer.total_lines(),
-                                self.view.font_size,
-                                reader,
-                                &self.line_indexer,
-                            ) {
-                                // 使用过渡滑动效果，而不是直接跳转
-                                self.scroll.to_row = Some(target_line);
-                            }
-                        }
-                    });
-
-                // 主文本区域占用剩余空间
-                egui::CentralPanel::default().show_inside(ui, |ui| {
-                    self.render_file_content(ui);
-                });
-            } else {
-                // 没有minimap时的正常渲染
-                self.render_file_content(ui);
-            }
+            // 直接在主区域渲染，不使用侧边面板
+            self.render_file_content(ui);
         });
     }
 
@@ -1419,15 +1386,70 @@ impl TextViewerApp {
         }
 
         let scrollbar_width: f32 = 14.0;
+        let minimap_width = if self.view.show_minimap { self.minimap.width() } else { 0.0 };
         let available_rect = ui.available_rect_before_wrap();
         ui.allocate_rect(available_rect, egui::Sense::hover());
 
-        let (content_rect, scrollbar_rect) =
-            self.calculate_layout_rects(available_rect, scrollbar_width);
+        let (content_rect, scrollbar_rect, minimap_rect) =
+            self.calculate_layout_rects_with_minimap(available_rect, scrollbar_width, minimap_width);
+
+        // 渲染minimap（如果启用）
+        if self.view.show_minimap {
+            if let Some(ref reader) = self.file_reader {
+                if let Some(target_line) = self.minimap.render(
+                    ui,
+                    minimap_rect,
+                    self.scroll.line,
+                    self.scroll.visible_lines,
+                    total_lines,
+                    self.view.font_size,
+                    reader,
+                    &self.line_indexer,
+                ) {
+                    // 使用过渡滑动效果，而不是直接跳转
+                    self.scroll.to_row = Some(target_line);
+                }
+            }
+        }
 
         self.render_scrollbar(ui, scrollbar_rect, total_lines, row_height);
         self.handle_scroll_input(ui, content_rect, row_height, total_lines);
         self.render_content(ui, content_rect, total_lines, row_height);
+    }
+
+    fn calculate_layout_rects_with_minimap(
+        &self,
+        available_rect: egui::Rect,
+        scrollbar_width: f32,
+        minimap_width: f32,
+    ) -> (egui::Rect, egui::Rect, egui::Rect) {
+        let scrollbar_width = scrollbar_width.min(available_rect.width().max(0.0));
+        let minimap_width = minimap_width.min(available_rect.width().max(0.0));
+        
+        // 滚动条在最右边
+        let scrollbar_rect = egui::Rect::from_min_max(
+            egui::pos2(available_rect.right() - scrollbar_width, available_rect.top()),
+            egui::pos2(available_rect.right(), available_rect.bottom()),
+        );
+        
+        // minimap在滚动条左边
+        let minimap_rect = if minimap_width > 0.0 {
+            egui::Rect::from_min_max(
+                egui::pos2(scrollbar_rect.left() - minimap_width, available_rect.top()),
+                egui::pos2(scrollbar_rect.left(), available_rect.bottom()),
+            )
+        } else {
+            egui::Rect::NOTHING
+        };
+        
+        // 内容区域占用剩余空间
+        let content_right = if minimap_width > 0.0 { minimap_rect.left() } else { scrollbar_rect.left() };
+        let content_rect = egui::Rect::from_min_max(
+            available_rect.left_top(),
+            egui::pos2(content_right, available_rect.bottom()),
+        );
+        
+        (content_rect, scrollbar_rect, minimap_rect)
     }
 
     fn calculate_layout_rects(
