@@ -1078,18 +1078,14 @@ impl TextViewerApp {
     fn render_text_area(&mut self, ctx: &egui::Context) {
         egui::CentralPanel::default().show(ctx, |ui| {
             if self.file_reader.is_none() {
-                self.render_empty_state(ui);
+                ui.centered_and_justified(|ui| {
+                    ui.heading("Large Text Viewer");
+                    ui.label("\nClick File → Open to load a text file");
+                });
                 return;
             }
 
             self.render_file_content(ui);
-        });
-    }
-
-    fn render_empty_state(&self, ui: &mut egui::Ui) {
-        ui.centered_and_justified(|ui| {
-            ui.heading("Large Text Viewer");
-            ui.label("\nClick File → Open to load a text file");
         });
     }
 
@@ -1098,9 +1094,7 @@ impl TextViewerApp {
         let line_height = ui.fonts(|f| f.row_height(&font_id));
         let total_lines = self.line_indexer.total_lines();
 
-        if total_lines == 0 {
-            return;
-        }
+        if total_lines == 0 { return; }
 
         let spacing = ui.spacing().item_spacing.y;
         let row_height = line_height + spacing;
@@ -1258,7 +1252,7 @@ impl TextViewerApp {
             return;
         }
 
-        let delta_rows = (self.scroll.intra_row_offset_px / row_height).trunc() as i64;
+        let delta_rows = (self.scroll.intra_row_offset_px / row_height).floor() as i64;
         if delta_rows != 0 {
             self.scroll.intra_row_offset_px -= (delta_rows as f32) * row_height;
             let new_row = (self.scroll.line as i64 + delta_rows).clamp(0, (total_lines - 1) as i64);
@@ -1590,6 +1584,7 @@ impl TextViewerApp {
 
 impl eframe::App for TextViewerApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // 记录启动时间
         if let Some(start) = self.open_start_time.take() {
             let elapsed = start.elapsed();
             self.status_message = format!("{} (Rendered in {:.2?})", self.status_message, elapsed);
