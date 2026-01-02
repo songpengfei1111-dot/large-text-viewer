@@ -1219,12 +1219,16 @@ impl TextViewerApp {
 
                                 let render_start_line = self.scroll_line.min(total_lines - 1);
                                 let max_render_lines = if self.scroll_drag_target_row.is_some() {
-                                    self.visible_lines.min(20)
+                                    self.visible_lines
                                 } else {
                                     self.visible_lines
                                 };
                                 let render_end_line =
                                     (render_start_line + max_render_lines).min(total_lines);
+
+                                let render_height = ((render_end_line - render_start_line) as f32)
+                                    * row_height_with_spacing
+                                    + self.scroll_intra_row_offset_px;
 
                                 let shifted_rect = egui::Rect::from_min_size(
                                     egui::pos2(
@@ -1233,7 +1237,7 @@ impl TextViewerApp {
                                     ),
                                     egui::vec2(
                                         ui.max_rect().width(),
-                                        content_rect.height() + self.scroll_intra_row_offset_px,
+                                        render_height.max(content_rect.height()),
                                     ),
                                 );
 
