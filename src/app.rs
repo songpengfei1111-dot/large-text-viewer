@@ -17,6 +17,11 @@ use large_text_core::search_engine::{SearchEngine, SearchMessage, SearchResult, 
 struct MiniMapRenderer {
     enabled: bool,
     width: f32,
+    // 缓存的chunk数据
+    cached_chunk: Option<String>,
+    cached_start_line: usize,
+    cached_end_line: usize,
+    cached_chunk_start_offset: usize,
 }
 
 impl Default for MiniMapRenderer {
@@ -24,6 +29,10 @@ impl Default for MiniMapRenderer {
         Self {
             enabled: true,
             width: 200.0,
+            cached_chunk: None,
+            cached_start_line: 0,
+            cached_end_line: 0,
+            cached_chunk_start_offset: 0,
         }
     }
 }
@@ -37,9 +46,9 @@ impl MiniMapRenderer {
         self.width
     }
 
-    /// 渲染minimap - 只显示当前视口周围7倍范围的内容
+    /// 渲染minimap - 使用chunk缓存优化性能
     fn render(
-        &self,
+        &mut self,
         ui: &mut egui::Ui,
         rect: egui::Rect,
         current_line: usize,
@@ -60,8 +69,8 @@ impl MiniMapRenderer {
         painter.rect_filled(rect, 2.0, egui::Color32::from_gray(25));
         painter.rect_stroke(rect, 2.0, egui::Stroke::new(1.0, egui::Color32::from_gray(60)));
 
-        // 计算minimap显示范围：当前视口的7倍
-        let minimap_range = visible_lines * 7;
+        // 计算minimap显示范围：当前视口的15倍（增加缓存范围）
+        let minimap_range = visible_lines * 15;
         let half_range = minimap_range / 2;
         
         // 计算起始和结束行，确保在文件范围内
@@ -73,56 +82,56 @@ impl MiniMapRenderer {
             return None;
         }
 
+        // 检查是否需要更新chunk缓存
+        let need_refresh = self.cached_chunk.is_none() 
+            || current_line < self.cached_start_line + visible_lines * 3  // 当前位置接近缓存开始
+            || current_line + visible_lines > self.cached_end_line - visible_lines * 3; // 当前位置接近缓存结束
+
+        if need_refresh {
+            self.update_chunk_cache(start_line, end_line, reader, indexer);
+        }
+
         // 计算每行在minimap中的高度
         let available_height = rect.height() - 20.0; // 留出边距
         let line_height = available_height / actual_range as f32;
 
-        // 渲染文本行
-        let mini_font_size = (font_size * 0.4).max(6.0);
+        // 渲染文本行 - 使用更细的字体
+        let mini_font_size = 0.1;
         let text_color = egui::Color32::from_gray(150);
-        let current_viewport_color = egui::Color32::from_gray(200);
+        let current_viewport_color = egui::Color32::from_gray(100);
 
-        for line_num in start_line..end_line {
-            let relative_idx = line_num - start_line;
-            let y_pos = rect.top() + 10.0 + relative_idx as f32 * line_height;
-            
-            if y_pos + line_height > rect.bottom() {
-                break;
-            }
+        if let Some(ref cached_chunk) = self.cached_chunk {
+            for line_num in start_line..end_line {
+                let relative_idx = line_num - start_line;
+                let y_pos = rect.top() + 10.0 + relative_idx as f32 * line_height;
+                
+                if y_pos + line_height > rect.bottom() {
+                    break;
+                }
 
-            // 获取行内容
-            if let Some((line_start, line_end)) = indexer.get_line_range(line_num) {
-                let line_text = reader.get_chunk(line_start, line_end);
-                let trimmed = line_text
-                    .trim_end_matches('\n')
-                    .trim_end_matches('\r')
-                    .chars()
-                    .take(30) // 限制显示字符数
-                    .collect::<String>();
+                // 从缓存的chunk中获取行内容
+                if let Some(line_text) = self.get_line_from_cache(line_num, indexer) {
+                    let trimmed = line_text
+                        .trim_end_matches('\n')
+                        .trim_end_matches('\r')
+                        .chars()
+                        .take(40)
+                        .collect::<String>();
 
-                // 判断是否在当前视口内
-                let is_in_viewport = line_num >= current_line && line_num < current_line + visible_lines;
-                let color = if is_in_viewport { current_viewport_color } else { text_color };
+                    // 判断是否在当前视口内
+                    let is_in_viewport = line_num >= current_line && line_num < current_line + visible_lines;
+                    let color = if is_in_viewport { current_viewport_color } else { text_color };
 
-                // 绘制行号
-                let line_num_text = format!("{:4}", line_num + 1);
-                painter.text(
-                    egui::pos2(rect.left() + 5.0, y_pos),
-                    egui::Align2::LEFT_TOP,
-                    line_num_text,
-                    egui::FontId::monospace(mini_font_size * 0.8),
-                    egui::Color32::from_gray(100),
-                );
-
-                // 绘制文本内容
-                if !trimmed.is_empty() {
-                    painter.text(
-                        egui::pos2(rect.left() + 35.0, y_pos),
-                        egui::Align2::LEFT_TOP,
-                        trimmed,
-                        egui::FontId::monospace(mini_font_size),
-                        color,
-                    );
+                    // 直接绘制文本内容（不显示行号）
+                    if !trimmed.is_empty() {
+                        painter.text(
+                            egui::pos2(rect.left() + 5.0, y_pos),
+                            egui::Align2::LEFT_TOP,
+                            trimmed,
+                            egui::FontId::monospace(mini_font_size),
+                            color,
+                        );
+                    }
                 }
             }
         }
@@ -179,6 +188,94 @@ impl MiniMapRenderer {
         }
 
         target_line
+    }
+
+    /// 更新chunk缓存
+    fn update_chunk_cache(
+        &mut self,
+        start_line: usize,
+        end_line: usize,
+        reader: &Arc<FileReader>,
+        indexer: &LineIndexer,
+    ) {
+        // 扩大缓存范围，减少频繁刷新
+        // 缓存范围是显示范围的2倍，这样在minimap滚动时有足够的缓冲
+        let cache_expansion = (end_line - start_line) / 2;
+        let cache_start_line = start_line.saturating_sub(cache_expansion);
+        let cache_end_line = (end_line + cache_expansion).min(indexer.total_lines());
+
+        if let Some((chunk_start_offset, chunk_end_offset)) = self.get_chunk_range(cache_start_line, cache_end_line, indexer) {
+            if let Ok(chunk) = std::panic::catch_unwind(|| {
+                reader.get_chunk(chunk_start_offset, chunk_end_offset)
+            }) {
+                self.cached_chunk = Some(chunk);
+                self.cached_start_line = cache_start_line;
+                self.cached_end_line = cache_end_line;
+                self.cached_chunk_start_offset = chunk_start_offset;
+            }
+        }
+    }
+
+    /// 获取chunk的字节范围
+    fn get_chunk_range(
+        &self,
+        start_line: usize,
+        end_line: usize,
+        indexer: &LineIndexer,
+    ) -> Option<(usize, usize)> {
+        if start_line >= indexer.total_lines() {
+            return None;
+        }
+
+        let chunk_start = if let Some((start_offset, _)) = indexer.get_line_range(start_line) {
+            start_offset
+        } else {
+            return None;
+        };
+
+        let chunk_end = if end_line >= indexer.total_lines() {
+            // 如果超出文件范围，使用文件末尾
+            usize::MAX
+        } else if let Some((end_offset, _)) = indexer.get_line_range(end_line) {
+            end_offset
+        } else {
+            usize::MAX
+        };
+
+        Some((chunk_start, chunk_end))
+    }
+
+    /// 从缓存的chunk中获取指定行的文本
+    fn get_line_from_cache(&self, line_num: usize, indexer: &LineIndexer) -> Option<&str> {
+        let cached_chunk = self.cached_chunk.as_ref()?;
+        
+        // 检查行号是否在缓存范围内
+        if line_num < self.cached_start_line || line_num >= self.cached_end_line {
+            return None;
+        }
+
+        // 获取行在原文件中的字节偏移
+        let (line_start_offset, line_end_offset) = indexer.get_line_range(line_num)?;
+        
+        // 计算在缓存chunk中的相对偏移
+        let relative_start = line_start_offset.saturating_sub(self.cached_chunk_start_offset);
+        let relative_end = if line_end_offset == usize::MAX {
+            cached_chunk.len()
+        } else {
+            (line_end_offset.saturating_sub(self.cached_chunk_start_offset)).min(cached_chunk.len())
+        };
+
+        // 确保偏移在有效范围内
+        if relative_start >= cached_chunk.len() || relative_start >= relative_end {
+            return None;
+        }
+
+        // 确保在UTF-8字符边界上切片
+        if cached_chunk.is_char_boundary(relative_start) && cached_chunk.is_char_boundary(relative_end) {
+            Some(&cached_chunk[relative_start..relative_end])
+        } else {
+            None
+        }
     }
 }
 
@@ -259,11 +356,6 @@ struct ScrollState {
     drag_target_row: Option<usize>,
     drag_grab_offset_px: Option<f32>,
     drag_last_commit: Option<Instant>,
-    // 添加平滑滚动支持
-    target_line: Option<usize>,
-    animation_start_time: Option<Instant>,
-    animation_start_line: usize,
-    animation_duration: Duration,
 }
 
 impl Default for ScrollState {
@@ -1284,7 +1376,7 @@ impl TextViewerApp {
                                 reader,
                                 &self.line_indexer,
                             ) {
-                                self.scroll.line = target_line;
+                                // 使用过渡滑动效果，而不是直接跳转
                                 self.scroll.to_row = Some(target_line);
                             }
                         }
