@@ -1184,7 +1184,7 @@ impl TextViewerApp {
                             if row_height_with_spacing > 0.0 {
                                 let delta_rows = (self.scroll_intra_row_offset_px
                                     / row_height_with_spacing)
-                                    .trunc() as i64;
+                                    .floor() as i64;
 
                                 if delta_rows != 0 {
                                     self.scroll_intra_row_offset_px -=
@@ -1194,9 +1194,15 @@ impl TextViewerApp {
                                     self.scroll_line = new_row as usize;
                                 }
 
-                                self.scroll_intra_row_offset_px = self
-                                    .scroll_intra_row_offset_px
-                                    .clamp(0.0, row_height_with_spacing.max(0.0));
+                                if self.scroll_line == 0 {
+                                    self.scroll_intra_row_offset_px =
+                                        self.scroll_intra_row_offset_px.max(0.0);
+                                }
+                                if self.scroll_line >= total_lines.saturating_sub(1) {
+                                    self.scroll_intra_row_offset_px = self
+                                        .scroll_intra_row_offset_px
+                                        .min(row_height_with_spacing);
+                                }
                             }
                         }
                     }
