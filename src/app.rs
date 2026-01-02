@@ -79,6 +79,16 @@ pub struct TextViewerApp {
     pending_scroll_target: Option<usize>,
     last_scroll_offset: f32,
 
+    // Segmented virtual scrolling for very large files (千万行级别)
+    // 每个段包含的最大行数，确保每段的虚拟高度不超过 f32 安全范围
+    segment_size: usize,
+    // 当前显示的段索引 (0-based)
+    current_segment: usize,
+    // 总段数
+    total_segments: usize,
+    // 段内滚动偏移（在段切换时需要重置）
+    segment_scroll_offset: Option<f32>,
+
     // Focus control
     focus_search_input: bool,
 
@@ -146,6 +156,12 @@ impl Default for TextViewerApp {
             scroll_correction: 0,
             pending_scroll_target: None,
             last_scroll_offset: 0.0,
+            // 分段虚拟滚动：每段约500万行，确保像素高度在f32安全范围内
+            // 假设每行约20像素，500万行 = 1亿像素，在f32精度范围内
+            segment_size: 5_000_000,
+            current_segment: 0,
+            total_segments: 1,
+            segment_scroll_offset: None,
             unsaved_changes: false,
             pending_replacements: Vec::new(),
             open_start_time: None,
@@ -171,6 +187,14 @@ impl TextViewerApp {
                 self.search_page_start_index = 0;
                 self.page_offsets.clear();
                 self.current_result_index = 0;
+
+                // 计算分段信息
+                let total_lines = self.line_indexer.total_lines();
+                self.total_segments = (total_lines + self.segment_size - 1) / self.segment_size;
+                self.total_segments = self.total_segments.max(1);
+                self.current_segment = 0;
+                self.segment_scroll_offset = Some(0.0);
+                self.scroll_correction = 0;
 
                 // Setup file watcher if tail mode is enabled
                 if self.tail_mode {
@@ -649,9 +673,8 @@ impl TextViewerApp {
             let local_index = next_index - self.search_page_start_index;
             let result = &self.search_results[local_index];
             let target_line = self.line_indexer.find_line_at_offset(result.byte_offset);
-            self.scroll_line = target_line;
-            self.scroll_to_row = Some(target_line);
-            self.pending_scroll_target = Some(target_line);
+            // 使用 jump_to_line 支持跨段跳转
+            self.jump_to_line(target_line);
         } else {
             // Need to fetch next page
             // If we are wrapping around to 0
@@ -699,9 +722,8 @@ impl TextViewerApp {
             let local_index = prev_index - self.search_page_start_index;
             let result = &self.search_results[local_index];
             let target_line = self.line_indexer.find_line_at_offset(result.byte_offset);
-            self.scroll_line = target_line;
-            self.scroll_to_row = Some(target_line);
-            self.pending_scroll_target = Some(target_line);
+            // 使用 jump_to_line 支持跨段跳转
+            self.jump_to_line(target_line);
         } else {
             // Need to fetch previous page (or last page if wrapping)
             if prev_index == self.total_search_results - 1 {
@@ -772,14 +794,68 @@ impl TextViewerApp {
         });
     }
 
+    /// 根据全局行号计算所在的段索引
+    fn line_to_segment(&self, line: usize) -> usize {
+        line / self.segment_size
+    }
+
+    /// 根据全局行号计算在段内的相对行号
+    fn line_to_segment_offset(&self, line: usize) -> usize {
+        line % self.segment_size
+    }
+
+    /// 获取当前段的起始行号（全局）
+    fn segment_start_line(&self) -> usize {
+        self.current_segment * self.segment_size
+    }
+
+    /// 获取当前段的结束行号（全局，不含）
+    fn segment_end_line(&self) -> usize {
+        let total_lines = self.line_indexer.total_lines();
+        ((self.current_segment + 1) * self.segment_size).min(total_lines)
+    }
+
+    /// 获取当前段包含的行数
+    fn segment_line_count(&self) -> usize {
+        self.segment_end_line() - self.segment_start_line()
+    }
+
+    /// 切换到指定段
+    fn switch_to_segment(&mut self, segment: usize) {
+        if segment >= self.total_segments {
+            return;
+        }
+        if segment != self.current_segment {
+            self.current_segment = segment;
+            self.segment_scroll_offset = Some(0.0);
+            self.scroll_correction = 0;
+            self.last_scroll_offset = 0.0;
+        }
+    }
+
+    /// 跳转到指定的全局行号，自动切换段
+    fn jump_to_line(&mut self, global_line: usize) {
+        let target_segment = self.line_to_segment(global_line);
+        let segment_offset = self.line_to_segment_offset(global_line);
+        
+        if target_segment != self.current_segment {
+            self.current_segment = target_segment;
+            self.scroll_correction = 0;
+            self.last_scroll_offset = 0.0;
+        }
+        
+        self.scroll_to_row = Some(segment_offset);
+        self.pending_scroll_target = Some(segment_offset);
+        self.scroll_line = global_line;
+    }
+
     fn go_to_line(&mut self) {
         if let Ok(line_num) = self.goto_line_input.parse::<usize>() {
             if line_num > 0 && line_num <= self.line_indexer.total_lines() {
                 let target_line = line_num - 1; // 0-indexed
-                                                // Show a few lines of context above the target line for better orientation
-                self.scroll_line = target_line.saturating_sub(3);
-                self.scroll_to_row = Some(target_line);
-                self.pending_scroll_target = Some(target_line);
+                // Show a few lines of context above the target line for better orientation
+                let context_line = target_line.saturating_sub(3);
+                self.jump_to_line(context_line);
                 self.status_message = format!("Jumped to line {}", line_num);
             } else {
                 self.status_message = "Line number out of range".to_string();
@@ -1016,6 +1092,47 @@ impl TextViewerApp {
                     ui.label(format!("Encoding: {}", reader.encoding().name()));
                     ui.separator();
                     ui.label(format!("Line: {}", self.scroll_line + 1));
+                    
+                    // 分段导航控件（仅当有多个段时显示）
+                    if self.total_segments > 1 {
+                        ui.separator();
+                        ui.label(format!("Segment: {}/{}", self.current_segment + 1, self.total_segments));
+                        
+                        if ui.add_enabled(self.current_segment > 0, egui::Button::new("◀").small())
+                            .on_hover_text("Previous segment")
+                            .clicked()
+                        {
+                            self.switch_to_segment(self.current_segment.saturating_sub(1));
+                        }
+                        
+                        if ui.add_enabled(
+                            self.current_segment + 1 < self.total_segments,
+                            egui::Button::new("▶").small()
+                        )
+                            .on_hover_text("Next segment")
+                            .clicked()
+                        {
+                            self.switch_to_segment(self.current_segment + 1);
+                        }
+                        
+                        // 快速跳转到首/末段
+                        if ui.add_enabled(self.current_segment > 0, egui::Button::new("⏮").small())
+                            .on_hover_text("First segment")
+                            .clicked()
+                        {
+                            self.switch_to_segment(0);
+                        }
+                        
+                        if ui.add_enabled(
+                            self.current_segment + 1 < self.total_segments,
+                            egui::Button::new("⏭").small()
+                        )
+                            .on_hover_text("Last segment")
+                            .clicked()
+                        {
+                            self.switch_to_segment(self.total_segments - 1);
+                        }
+                    }
                 } else {
                     ui.label("No file opened - Click File → Open to start");
                 }
@@ -1038,103 +1155,117 @@ impl TextViewerApp {
                 return;
             };
 
-            let available_height = ui.available_height(); //窗口高度
+            let available_height = ui.available_height();
             let font_id = egui::FontId::monospace(self.font_size);
             let line_height = ui.fonts(|f| f.row_height(&font_id));
             self.visible_lines = ((available_height / line_height).ceil() as usize).saturating_add(2);
 
-            let mut scroll_area = egui::ScrollArea::both()
-                    // Tie scroll memory to the current file path so new files start at the top
-                .id_salt(
-                    self.file_reader
-                        .as_ref()
-                        .map(|r| r.path().display().to_string())
-                        .unwrap_or_else(|| "no_file".to_string()),
-                )
-                .auto_shrink([false, false])
-                .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible)//滑动条可见
-                .drag_to_scroll(true).enable_scrolling(true).animated(true);
+            let total_lines = self.line_indexer.total_lines();
+            
+            // 分段虚拟滚动：计算当前段的行范围
+            let segment_start = self.segment_start_line();
+            let segment_end = self.segment_end_line();
+            let segment_lines = self.segment_line_count();
 
-            // Apply programmatic scroll if requested
+            // 使用段索引作为 scroll area 的 id，以便每段有独立的滚动状态
+            let scroll_id = format!(
+                "{}:seg{}",
+                self.file_reader
+                    .as_ref()
+                    .map(|r| r.path().display().to_string())
+                    .unwrap_or_else(|| "no_file".to_string()),
+                self.current_segment
+            );
+
+            let mut scroll_area = egui::ScrollArea::both()
+                .id_salt(scroll_id)
+                .auto_shrink([false, false])
+                .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible)
+                .drag_to_scroll(true)
+                .enable_scrolling(true)
+                .animated(true);
+
+            // Apply programmatic scroll if requested (段内相对位置)
             let mut programmatic_scroll = false;
             if let Some(target_row) = self.scroll_to_row.take() {
-                scroll_area =
-                    scroll_area.vertical_scroll_offset(target_row as f32 * line_height);
+                let spacing = ui.spacing().item_spacing.y;
+                let row_height_with_spacing = line_height + spacing;
+                scroll_area = scroll_area.vertical_scroll_offset(target_row as f32 * row_height_with_spacing);
+                programmatic_scroll = true;
+            }
+            
+            // 如果有 segment_scroll_offset，应用它
+            if let Some(offset) = self.segment_scroll_offset.take() {
+                let spacing = ui.spacing().item_spacing.y;
+                let row_height_with_spacing = line_height + spacing;
+                scroll_area = scroll_area.vertical_scroll_offset(offset * row_height_with_spacing);
                 programmatic_scroll = true;
             }
 
-            let mut first_visible_row = None;
-            let total_lines = self.line_indexer.total_lines();
+            let mut first_visible_row_in_segment: Option<usize> = None;
 
-            // 使用 show_viewport 而不是 show_rows，以便更好地控制大文件渲染
             let output = scroll_area.show_viewport(ui, |ui, viewport| {
-                // 设置内容总高度，但限制最大值以避免 f32 精度问题
                 let spacing = ui.spacing().item_spacing.y;
                 let row_height_with_spacing = line_height + spacing;
-                let total_height = (row_height_with_spacing * total_lines as f32 - spacing)
-                    .at_least(0.0)
-                    .min(1e8); // 限制最大高度为 1 亿像素，避免 f32 精度损失
+                
+                // 当前段的总高度（安全的 f32 范围内）
+                let segment_height = (row_height_with_spacing * segment_lines as f32 - spacing)
+                    .at_least(0.0);
 
-                ui.set_height(total_height);
+                ui.set_height(segment_height);
 
-                // 根据 viewport 计算可见行范围
-                let mut min_row = (viewport.min.y / row_height_with_spacing).floor() as usize;
-                let mut max_row = (viewport.max.y / row_height_with_spacing).ceil() as usize + 1;
+                // 根据 viewport 计算段内可见行范围
+                let mut min_row_in_segment = (viewport.min.y / row_height_with_spacing).floor() as usize;
+                let mut max_row_in_segment = (viewport.max.y / row_height_with_spacing).ceil() as usize + 1;
 
-                // 确保范围有效
-                min_row = min_row.min(total_lines);
-                max_row = max_row.min(total_lines);
+                min_row_in_segment = min_row_in_segment.min(segment_lines);
+                max_row_in_segment = max_row_in_segment.min(segment_lines);
 
-                // 如果范围太小，确保至少渲染一些行
-                if max_row <= min_row && min_row < total_lines {
-                    max_row = (min_row + self.visible_lines).min(total_lines);
+                if max_row_in_segment <= min_row_in_segment && min_row_in_segment < segment_lines {
+                    max_row_in_segment = (min_row_in_segment + self.visible_lines).min(segment_lines);
                 }
 
                 // Calculate scroll correction if we just jumped
                 if let Some(target) = self.pending_scroll_target.take() {
-                    self.scroll_correction = target as i64 - min_row as i64;
+                    self.scroll_correction = target as i64 - min_row_in_segment as i64;
                 }
 
-                // Apply correction to find the actual start line we want to render
-                let corrected_start_line =
-                    (min_row as i64 + self.scroll_correction).max(0) as usize;
-                let corrected_end_line = corrected_start_line + (max_row - min_row);
+                // Apply correction to find the actual start line we want to render (段内)
+                let corrected_start_in_segment =
+                    (min_row_in_segment as i64 + self.scroll_correction).max(0) as usize;
+                let corrected_end_in_segment = (corrected_start_in_segment + (max_row_in_segment - min_row_in_segment))
+                    .min(segment_lines);
 
-                // Capture the first visible row (corrected)
-                if first_visible_row.is_none() {
-                    first_visible_row = Some(corrected_start_line);
-                }
+                first_visible_row_in_segment = Some(corrected_start_in_segment);
+
+                // 转换为全局行号
+                let global_start_line = segment_start + corrected_start_in_segment;
+                let global_end_line = segment_start + corrected_end_in_segment;
 
                 // 计算渲染区域的位置
-                let y_min = ui.max_rect().top() + corrected_start_line as f32 * row_height_with_spacing;
-                let y_max = ui.max_rect().top() + corrected_end_line as f32 * row_height_with_spacing;
+                let y_min = ui.max_rect().top() + corrected_start_in_segment as f32 * row_height_with_spacing;
+                let y_max = ui.max_rect().top() + corrected_end_in_segment as f32 * row_height_with_spacing;
                 let rect = egui::Rect::from_x_y_ranges(ui.max_rect().x_range(), y_min..=y_max);
 
-                // 在指定位置分配 UI 空间并渲染
                 ui.allocate_new_ui(egui::UiBuilder::new().max_rect(rect), |viewport_ui| {
-                    viewport_ui.skip_ahead_auto_ids(corrected_start_line); // 确保 ID 一致性
+                    viewport_ui.skip_ahead_auto_ids(corrected_start_in_segment);
 
-                    // For contiguous rendering, we find the start offset of the first line
-                    // and then read sequentially.
                     let mut current_offset = if let Some((start, _)) = self
                         .line_indexer
-                        .get_line_range(corrected_start_line)
+                        .get_line_range(global_start_line)
                     {
                         start
                     } else {
                         return;
                     };
 
-                    let render_range = corrected_start_line..corrected_end_line.min(total_lines);
+                    let render_range = global_start_line..global_end_line.min(total_lines);
 
                     for line_num in render_range {
-                        // Read line starting at current_offset
-                        // We need to find the end of the line
-                        let chunk_size = 4096; // Read in chunks to find newline
+                        let chunk_size = 4096;
                         let mut line_end = current_offset;
                         let mut found_newline = false;
 
-                        // Scan for newline
                         while !found_newline {
                             let chunk = reader.get_bytes(line_end, line_end + chunk_size);
                             if chunk.is_empty() {
@@ -1142,7 +1273,7 @@ impl TextViewerApp {
                             }
 
                             if let Some(pos) = chunk.iter().position(|&b| b == b'\n') {
-                                line_end += pos + 1; // Include newline
+                                line_end += pos + 1;
                                 found_newline = true;
                             } else {
                                 line_end += chunk.len();
@@ -1155,7 +1286,7 @@ impl TextViewerApp {
 
                         let start = current_offset;
                         let end = line_end;
-                        current_offset = end; // Next line starts here
+                        current_offset = end;
 
                         if start >= reader.len() {
                             break;
@@ -1163,7 +1294,6 @@ impl TextViewerApp {
 
                         let mut line_text_owned = reader.get_chunk(start, end);
 
-                        // Apply pending replacements to the view
                         for replacement in &self.pending_replacements {
                             let rep_start = replacement.offset;
                             let rep_end = rep_start + replacement.old_len;
@@ -1187,10 +1317,8 @@ impl TextViewerApp {
                             .trim_end_matches('\n')
                             .trim_end_matches('\r');
 
-                        // Collect matches that fall within this line's byte span; this works even with sparse line indexing
                         let mut line_matches: Vec<(usize, usize, bool)> = Vec::new();
 
-                        // Determine the byte offset of the currently selected result
                         let selected_offset = if self.total_search_results > 0
                             && self.current_result_index >= self.search_page_start_index
                         {
@@ -1202,16 +1330,12 @@ impl TextViewerApp {
                         };
 
                         if self.search_find_all {
-                            // Use find_in_text to find matches in the current line (highlight all visible)
                             for (m_start, m_end) in self.search_engine.find_in_text(line_text) {
                                 let abs_start = start + m_start;
                                 let is_selected = Some(abs_start) == selected_offset;
                                 line_matches.push((m_start, m_end, is_selected));
                             }
                         } else {
-                            // Only highlight results present in search_results (e.g. single find)
-                            // Use binary search to find the first potential match
-                            // This assumes search_results is sorted by byte_offset
                             let start_idx = self
                                 .search_results
                                 .partition_point(|r| r.byte_offset < start);
@@ -1229,8 +1353,6 @@ impl TextViewerApp {
                                 }
                                 let rel_end = (rel_start + res.match_len).min(line_text.len());
 
-                                // Check if this is the currently selected result
-                                // We need to map local index to global index
                                 let global_idx = self.search_page_start_index + idx;
                                 let is_selected = global_idx == self.current_result_index;
 
@@ -1244,13 +1366,10 @@ impl TextViewerApp {
                                     egui::RichText::new(format!("{:6} ", line_num + 1))
                                         .monospace()
                                         .color(egui::Color32::DARK_GRAY);
-                                // Make line numbers non-selectable so drag-select only captures the content text
                                 ui.add(egui::Label::new(ln_text).selectable(false));
                             }
 
-                            // Build label with highlighted search matches
                             let label = if !line_matches.is_empty() {
-                                // Create a LayoutJob to highlight matches within the line using their byte offsets
                                 let mut job = egui::text::LayoutJob::default();
                                 let mut last_end = 0;
 
@@ -1282,7 +1401,6 @@ impl TextViewerApp {
                                             color: egui::Color32::BLACK,
                                             background: if *is_selected {
                                                 egui::Color32::from_rgb(255, 200, 0)
-                                            // orange-ish for current match
                                             } else {
                                                 egui::Color32::YELLOW
                                             },
@@ -1293,7 +1411,6 @@ impl TextViewerApp {
                                     last_end = match_end;
                                 }
 
-                                // Add remaining text after last match
                                 if last_end < line_text.len() {
                                     job.append(
                                         &line_text[last_end..],
@@ -1323,7 +1440,6 @@ impl TextViewerApp {
                                     .monospace()
                                     .size(self.font_size);
 
-                                // Apply wrap mode
                                 if self.wrap_mode {
                                     ui.add(egui::Label::new(text).wrap())
                                 } else {
@@ -1331,12 +1447,10 @@ impl TextViewerApp {
                                 }
                             };
 
-                            // Enable text selection for copy-paste
                             if label.hovered() {
                                 ui.output_mut(|o| o.cursor_icon = egui::CursorIcon::Text);
                             }
 
-                            // Ensure labels don't consume scroll events
                             label.surrender_focus();
                         });
                     }
@@ -1346,18 +1460,43 @@ impl TextViewerApp {
             // Check for manual scroll
             let current_offset = output.state.offset.y;
             if !programmatic_scroll && (current_offset - self.last_scroll_offset).abs() > 1.0 {
-                // Manual scroll detected (drag or wheel)
-                // Reset correction as user is establishing new position
                 self.scroll_correction = 0;
             }
             self.last_scroll_offset = current_offset;
 
-            // Update scroll_line to match what was actually displayed
-            if let Some(first_row) = first_visible_row {
-                self.scroll_line = first_row;
+            // Update scroll_line to match what was actually displayed (全局行号)
+            if let Some(first_row_in_segment) = first_visible_row_in_segment {
+                self.scroll_line = segment_start + first_row_in_segment;
             }
 
+            // 检测是否滚动到段边界，自动切换段
+            let spacing = ui.spacing().item_spacing.y;
+            let row_height_with_spacing = line_height + spacing;
+            let segment_height = row_height_with_spacing * segment_lines as f32;
+            let scroll_ratio = if segment_height > 0.0 {
+                current_offset / segment_height
+            } else {
+                0.0
+            };
 
+            // 如果滚动接近底部且有下一段，自动切换
+            if scroll_ratio > 0.98 && self.current_segment + 1 < self.total_segments {
+                self.current_segment += 1;
+                self.segment_scroll_offset = Some(0.0);
+                self.scroll_correction = 0;
+                self.last_scroll_offset = 0.0;
+                ctx.request_repaint();
+            }
+            // 如果滚动到顶部且有上一段，自动切换
+            else if current_offset < 1.0 && self.current_segment > 0 {
+                self.current_segment -= 1;
+                // 切换到上一段的末尾
+                let prev_segment_lines = self.segment_line_count();
+                self.segment_scroll_offset = Some((prev_segment_lines.saturating_sub(self.visible_lines)) as f32);
+                self.scroll_correction = 0;
+                self.last_scroll_offset = 0.0;
+                ctx.request_repaint();
+            }
         });
     }
 
