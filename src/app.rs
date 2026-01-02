@@ -90,9 +90,6 @@ pub struct TextViewerApp {
     // Focus control
     focus_search_input: bool,
 
-    // Smooth scrolling for large files
-    last_visible_row: Option<usize>,
-
     // Unsaved changes
     unsaved_changes: bool,
     pending_replacements: Vec<PendingReplacement>,
