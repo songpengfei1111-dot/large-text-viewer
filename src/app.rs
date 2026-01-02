@@ -85,6 +85,9 @@ pub struct TextViewerApp {
     // Focus control
     focus_search_input: bool,
 
+    // Smooth scrolling for large files
+    last_visible_row: Option<usize>,
+
     // Unsaved changes
     unsaved_changes: bool,
     pending_replacements: Vec<PendingReplacement>,
@@ -150,6 +153,7 @@ impl Default for TextViewerApp {
             cached_line_height: 20.0,
             pending_scroll_target: None,
             last_scroll_offset: 0.0,
+            last_visible_row: None,
             unsaved_changes: false,
             pending_replacements: Vec::new(),
             open_start_time: None,
@@ -1097,6 +1101,8 @@ impl TextViewerApp {
 
             let mut first_visible_row = None;
             let scale_factor = self.scroll_scale_factor;
+            let last_visible = self.last_visible_row;
+            let is_large_file = scale_factor < 1.0;
 
             let output = scroll_area.show_viewport(ui, |ui, viewport| {
                 ui.set_height(virtual_total_height.at_least(0.0));
@@ -1107,7 +1113,22 @@ impl TextViewerApp {
                 let real_min_y = virtual_min_y / scale_factor;
                 let real_max_y = virtual_max_y / scale_factor;
                 
-                let mut min_row = (real_min_y / row_height_with_spacing as f64).floor() as usize;
+                let target_min_row = (real_min_y / row_height_with_spacing as f64).floor() as usize;
+                let mut min_row = if is_large_file {
+                    if let Some(last) = last_visible {
+                        let diff = target_min_row as i64 - last as i64;
+                        if diff.abs() <= 3 {
+                            target_min_row
+                        } else {
+                            let max_step = (10.0 / scale_factor).clamp(10.0, 100.0) as i64;
+                            (last as i64 + diff.signum() * diff.abs().min(max_step)) as usize
+                        }
+                    } else {
+                        target_min_row
+                    }
+                } else {
+                    target_min_row
+                };
                 let mut max_row = (real_max_y / row_height_with_spacing as f64).ceil() as usize + 1;
 
                 min_row = min_row.min(total_lines);
@@ -1346,6 +1367,7 @@ impl TextViewerApp {
 
             if let Some(first_row) = first_visible_row {
                 self.scroll_line = first_row;
+                self.last_visible_row = Some(first_row);
             }
         });
     }
