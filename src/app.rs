@@ -14,6 +14,174 @@ use large_text_core::line_indexer::LineIndexer;
 use large_text_core::replacer::{ReplaceMessage, Replacer};
 use large_text_core::search_engine::{SearchEngine, SearchMessage, SearchResult, SearchType};
 
+struct MiniMapRenderer {
+    enabled: bool,
+    width: f32,
+}
+
+impl Default for MiniMapRenderer {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            width: 200.0,
+        }
+    }
+}
+
+impl MiniMapRenderer {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    fn width(&self) -> f32 {
+        self.width
+    }
+
+    /// 渲染minimap - 只显示当前视口周围7倍范围的内容
+    fn render(
+        &self,
+        ui: &mut egui::Ui,
+        rect: egui::Rect,
+        current_line: usize,
+        visible_lines: usize,
+        total_lines: usize,
+        font_size: f32,
+        reader: &Arc<FileReader>,
+        indexer: &LineIndexer,
+    ) -> Option<usize> {
+        if !self.enabled || total_lines == 0 {
+            return None;
+        }
+
+        let mut target_line = None;
+
+        // 绘制背景
+        let painter = ui.painter();
+        painter.rect_filled(rect, 2.0, egui::Color32::from_gray(25));
+        painter.rect_stroke(rect, 2.0, egui::Stroke::new(1.0, egui::Color32::from_gray(60)));
+
+        // 计算minimap显示范围：当前视口的7倍
+        let minimap_range = visible_lines * 7;
+        let half_range = minimap_range / 2;
+        
+        // 计算起始和结束行，确保在文件范围内
+        let start_line = current_line.saturating_sub(half_range);
+        let end_line = (current_line + visible_lines + half_range).min(total_lines);
+        let actual_range = end_line - start_line;
+
+        if actual_range == 0 {
+            return None;
+        }
+
+        // 计算每行在minimap中的高度
+        let available_height = rect.height() - 20.0; // 留出边距
+        let line_height = available_height / actual_range as f32;
+
+        // 渲染文本行
+        let mini_font_size = (font_size * 0.4).max(6.0);
+        let text_color = egui::Color32::from_gray(150);
+        let current_viewport_color = egui::Color32::from_gray(200);
+
+        for line_num in start_line..end_line {
+            let relative_idx = line_num - start_line;
+            let y_pos = rect.top() + 10.0 + relative_idx as f32 * line_height;
+            
+            if y_pos + line_height > rect.bottom() {
+                break;
+            }
+
+            // 获取行内容
+            if let Some((line_start, line_end)) = indexer.get_line_range(line_num) {
+                let line_text = reader.get_chunk(line_start, line_end);
+                let trimmed = line_text
+                    .trim_end_matches('\n')
+                    .trim_end_matches('\r')
+                    .chars()
+                    .take(30) // 限制显示字符数
+                    .collect::<String>();
+
+                // 判断是否在当前视口内
+                let is_in_viewport = line_num >= current_line && line_num < current_line + visible_lines;
+                let color = if is_in_viewport { current_viewport_color } else { text_color };
+
+                // 绘制行号
+                let line_num_text = format!("{:4}", line_num + 1);
+                painter.text(
+                    egui::pos2(rect.left() + 5.0, y_pos),
+                    egui::Align2::LEFT_TOP,
+                    line_num_text,
+                    egui::FontId::monospace(mini_font_size * 0.8),
+                    egui::Color32::from_gray(100),
+                );
+
+                // 绘制文本内容
+                if !trimmed.is_empty() {
+                    painter.text(
+                        egui::pos2(rect.left() + 35.0, y_pos),
+                        egui::Align2::LEFT_TOP,
+                        trimmed,
+                        egui::FontId::monospace(mini_font_size),
+                        color,
+                    );
+                }
+            }
+        }
+
+        // 绘制当前可见区域的高亮框
+        let viewport_start_relative = current_line.saturating_sub(start_line);
+        let viewport_end_relative = (current_line + visible_lines).saturating_sub(start_line);
+        
+        let viewport_top = rect.top() + 10.0 + viewport_start_relative as f32 * line_height;
+        let viewport_bottom = rect.top() + 10.0 + viewport_end_relative as f32 * line_height;
+        let viewport_height = (viewport_bottom - viewport_top).max(8.0);
+
+        let viewport_rect = egui::Rect::from_min_size(
+            egui::pos2(rect.left() + 2.0, viewport_top),
+            egui::vec2(rect.width() - 4.0, viewport_height),
+        );
+
+        // 绘制当前视口高亮
+        painter.rect_filled(
+            viewport_rect,
+            2.0,
+            egui::Color32::from_rgba_unmultiplied(255, 255, 255, 40),
+        );
+        painter.rect_stroke(
+            viewport_rect,
+            2.0,
+            egui::Stroke::new(2.0, egui::Color32::WHITE),
+        );
+
+        // 处理点击事件
+        let response = ui.interact(rect, ui.id().with("minimap"), egui::Sense::click());
+        if response.clicked() {
+            if let Some(click_pos) = response.interact_pointer_pos() {
+                let relative_y = click_pos.y - rect.top() - 10.0;
+                let click_ratio = (relative_y / available_height).clamp(0.0, 1.0);
+                
+                // 计算点击对应的行号
+                let clicked_relative_line = (click_ratio * actual_range as f32) as usize;
+                let clicked_line = start_line + clicked_relative_line;
+                
+                // 如果点击在当前视口上方，向上跳转一个屏幕
+                if click_pos.y < viewport_top {
+                    target_line = Some(current_line.saturating_sub(visible_lines));
+                }
+                // 如果点击在当前视口下方，向下跳转一个屏幕
+                else if click_pos.y > viewport_bottom {
+                    target_line = Some((current_line + visible_lines).min(total_lines.saturating_sub(1)));
+                }
+                // 如果点击在视口内或其他位置，跳转到点击的具体位置
+                else {
+                    target_line = Some(clicked_line.min(total_lines.saturating_sub(1)));
+                }
+            }
+        }
+
+        target_line
+    }
+}
+
 #[derive(Clone)]
 struct PendingReplacement {
     offset: usize,
@@ -91,6 +259,11 @@ struct ScrollState {
     drag_target_row: Option<usize>,
     drag_grab_offset_px: Option<f32>,
     drag_last_commit: Option<Instant>,
+    // 添加平滑滚动支持
+    target_line: Option<usize>,
+    animation_start_time: Option<Instant>,
+    animation_start_line: usize,
+    animation_duration: Duration,
 }
 
 impl Default for ScrollState {
@@ -123,6 +296,7 @@ struct ViewSettings {
     wrap_mode: bool,
     dark_mode: bool,
     show_line_numbers: bool,
+    show_minimap: bool,
 }
 
 impl Default for ViewSettings {
@@ -132,6 +306,7 @@ impl Default for ViewSettings {
             wrap_mode: false,
             dark_mode: true,
             show_line_numbers: true,
+            show_minimap: true,
         }
     }
 }
@@ -164,7 +339,8 @@ pub struct TextViewerApp {
     file_reader: Option<Arc<FileReader>>,
     line_indexer: LineIndexer,
     search_engine: SearchEngine,
-
+    minimap: MiniMapRenderer,
+    // 窗口实例的数据
     search: SearchState,
     replace: ReplaceState,
     scroll: ScrollState,
@@ -193,6 +369,7 @@ impl Default for TextViewerApp {
             file_reader: None,
             line_indexer: LineIndexer::new(),
             search_engine: SearchEngine::new(),
+            minimap: MiniMapRenderer::new(),
             search: SearchState::default(),
             replace: ReplaceState::default(),
             scroll: ScrollState::default(),
@@ -858,6 +1035,7 @@ impl TextViewerApp {
         ui.menu_button("View", |ui| {
             ui.checkbox(&mut self.view.wrap_mode, "Word Wrap");
             ui.checkbox(&mut self.view.show_line_numbers, "Line Numbers");
+            ui.checkbox(&mut self.view.show_minimap, "Show Minimap");
             ui.checkbox(&mut self.view.dark_mode, "Dark Mode");
             ui.separator();
             ui.label("Font Size:");
@@ -1085,7 +1263,41 @@ impl TextViewerApp {
                 return;
             }
 
-            self.render_file_content(ui);
+            // 如果启用了minimap，使用侧边面板布局
+            if self.view.show_minimap {
+                egui::SidePanel::right("minimap_panel")
+                    .resizable(true)
+                    .default_width(self.minimap.width())
+                    .width_range(150.0..=400.0)
+                    .show_inside(ui, |ui| {
+                        if let Some(ref reader) = self.file_reader {
+                            let minimap_rect = ui.available_rect_before_wrap();
+                            
+                            // 渲染minimap并处理点击
+                            if let Some(target_line) = self.minimap.render(
+                                ui,
+                                minimap_rect,
+                                self.scroll.line,
+                                self.scroll.visible_lines,
+                                self.line_indexer.total_lines(),
+                                self.view.font_size,
+                                reader,
+                                &self.line_indexer,
+                            ) {
+                                self.scroll.line = target_line;
+                                self.scroll.to_row = Some(target_line);
+                            }
+                        }
+                    });
+
+                // 主文本区域占用剩余空间
+                egui::CentralPanel::default().show_inside(ui, |ui| {
+                    self.render_file_content(ui);
+                });
+            } else {
+                // 没有minimap时的正常渲染
+                self.render_file_content(ui);
+            }
         });
     }
 
