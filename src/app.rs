@@ -96,7 +96,7 @@ impl MiniMapRenderer {
         let line_height = available_height / actual_range as f32;
 
         // 渲染文本行 - 使用等宽字体确保长宽一致
-        let mini_font_size = (font_size * 0.25).max(4.0); // 稍微增大字体以保证可读性
+        let mini_font_size = (font_size * 0.3).max(4.0); // 稍微增大字体以保证可读性
         let text_color = egui::Color32::from_gray(150);
         let current_viewport_color = egui::Color32::from_gray(200);
 
@@ -111,24 +111,49 @@ impl MiniMapRenderer {
 
                 // 从缓存的chunk中获取行内容
                 if let Some(line_text) = self.get_line_from_cache(line_num, indexer) {
-                    let trimmed = line_text
-                        .trim_end_matches('\n')
-                        .trim_end_matches('\r')
+                    // 处理换行符 - 遇到换行符后保持空行
+                    let processed_text = if line_text.contains('\n') {
+                        // 如果包含换行符，只取第一行，后面保持空
+                        line_text.split('\n').next().unwrap_or("")
+                    } else {
+                        line_text
+                            .trim_end_matches('\r')
+                    };
+
+                    let trimmed = processed_text
                         .chars()
-                        .take(80) // 减少到80个字符，确保在minimap宽度内显示完整
+                        .take(60) // 减少字符数以适应minimap宽度
                         .collect::<String>();
 
                     // 判断是否在当前视口内
                     let is_in_viewport = line_num >= current_line && line_num < current_line + visible_lines;
                     let color = if is_in_viewport { current_viewport_color } else { text_color };
 
-                    // 使用等宽字体绘制文本内容，确保字符长宽一致
+                    // 使用等宽字体绘制文本内容，确保左对齐不被拉伸
                     if !trimmed.is_empty() {
-                        painter.text(
+                        // 创建文本布局作业以确保正确的字体渲染
+                        let mut job = egui::text::LayoutJob::default();
+                        job.append(
+                            &trimmed,
+                            0.0,
+                            egui::TextFormat {
+                                font_id: egui::FontId::monospace(mini_font_size),
+                                color,
+                                ..Default::default()
+                            },
+                        );
+                        
+                        // 设置文本不换行，保持原始字符宽度
+                        job.wrap = egui::text::TextWrapping {
+                            max_width: f32::INFINITY,
+                            ..Default::default()
+                        };
+                        
+                        // 使用正确的API渲染文本
+                        let galley = painter.layout_job(job);
+                        painter.galley(
                             egui::pos2(rect.left() + 5.0, y_pos),
-                            egui::Align2::LEFT_TOP,
-                            trimmed,
-                            egui::FontId::monospace(mini_font_size), // 确保使用等宽字体
+                            galley,
                             color,
                         );
                     }
@@ -1437,7 +1462,8 @@ impl TextViewerApp {
             self.scroll.intra_row_offset_px = 0.0;
         }
 
-        let scrollbar_width: f32 = 14.0;
+        // 滚动条变细一半
+        let scrollbar_width: f32 = 7.0;
         let minimap_width = if self.view.show_minimap { self.minimap.width() } else { 0.0 };
         let available_rect = ui.available_rect_before_wrap();
         ui.allocate_rect(available_rect, egui::Sense::hover());
