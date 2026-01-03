@@ -279,6 +279,7 @@ impl MiniMapRenderer {
             return None;
         }
 
+
         // 获取行在原文件中的字节偏移
         let (line_start_offset, line_end_offset) = indexer.get_line_range(line_num)?;
         
@@ -289,6 +290,7 @@ impl MiniMapRenderer {
         } else {
             (line_end_offset.saturating_sub(self.cached_chunk_start_offset)).min(cached_chunk.len())
         };
+
 
         // 确保偏移在有效范围内
         if relative_start >= cached_chunk.len() || relative_start >= relative_end {

@@ -1,6 +1,8 @@
 mod app;
+mod app_simp;
 
 use app::TextViewerApp;
+use app_simp::TextViewerAppSimp;
 use eframe::egui;
 
 fn main() -> eframe::Result<()> {
@@ -10,10 +12,18 @@ fn main() -> eframe::Result<()> {
             .with_title("Large Text Viewer"),
         ..Default::default()
     };
+    //
+    // eframe::run_native(
+    //     "Large Text Viewer",
+    //     options,
+    //     Box::new(|_cc| Ok(Box::new(TextViewerApp::default()))),
+    // )
 
     eframe::run_native(
         "Large Text Viewer",
         options,
-        Box::new(|_cc| Ok(Box::new(TextViewerApp::default()))),
+        Box::new(|_cc| Ok(Box::new(TextViewerAppSimp::default()))),
     )
+
+
 }
