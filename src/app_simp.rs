@@ -331,9 +331,7 @@ impl TextViewerAppSimp {
         let line_height = ui.fonts(|f| f.row_height(&font_id));
         let total_lines = self.text_cache.total_lines();
 
-        if total_lines == 0 {
-            return;
-        }
+        if total_lines == 0 { return; }
 
         let available_height = ui.available_height();
         let row_height = line_height + ui.spacing().item_spacing.y;
