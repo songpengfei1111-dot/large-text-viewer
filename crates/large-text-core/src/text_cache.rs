@@ -222,7 +222,45 @@ impl TextCache {
         self.reader = None;
         self.indexer = None;
     }
+
+    /// 获取文件大小
+    pub fn file_size(&self) -> usize {
+        self.reader.as_ref().map_or(0, |r| r.len())
+    }
+
+    /// 获取FileReader引用（用于CLI操作）
+    pub fn get_file_reader(&self) -> Option<&Arc<FileReader>> {
+        self.reader.as_ref()
+    }
+
+    /// 根据字节偏移量获取行信息
+    pub fn get_line_info_by_offset(&self, byte_offset: usize) -> Option<LineInfo> {
+        let indexer = self.indexer.as_ref()?;
+        
+        // 遍历所有行找到包含该偏移量的行
+        for line_num in 0..indexer.total_lines() {
+            if let Some((start_offset, end_offset)) = indexer.get_line_range(line_num) {
+                if byte_offset >= start_offset && (end_offset == usize::MAX || byte_offset < end_offset) {
+                    return Some(LineInfo {
+                        line_number: line_num,
+                        start_offset,
+                        end_offset,
+                    });
+                }
+            }
+        }
+        None
+    }
 }
+
+/// 行信息结构体
+#[derive(Debug, Clone)]
+pub struct LineInfo {
+    pub line_number: usize,
+    pub start_offset: usize,
+    pub end_offset: usize,
+}
+
 
 /// 获取chunk的字节范围
 fn get_chunk_range(start_line: usize, end_line: usize, indexer: &LineIndexer) -> Option<(usize, usize)> {
