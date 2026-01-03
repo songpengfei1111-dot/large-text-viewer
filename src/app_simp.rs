@@ -57,6 +57,7 @@ impl MiniMap {
     }
 
     /// 渲染文本内容
+    /// 渲染文本内容
     fn render_text(
         &self,
         ui: &mut egui::Ui,
@@ -72,58 +73,66 @@ impl MiniMap {
         let actual_range = end_line - start_line;
         let line_height = available_height / actual_range as f32;
         let mini_font_size = (font_size * 0.3).max(4.0);
-        let painter = ui.painter();
 
         // 批量获取文本行
         let lines = text_cache.get_lines(start_line, end_line);
 
-        for (idx, line_text) in lines.iter().enumerate() {
-            let line_num = start_line + idx;
-            let y_pos = rect.top() + 10.0 + idx as f32 * line_height;
-            
-            if y_pos + line_height > rect.bottom() {
-                break;
-            }
-
-            let processed_text = line_text
-                .split('\n').next().unwrap_or("")
-                .trim_end_matches('\r')
-                .chars()
-                .take(50)
-                .collect::<String>();
-
-            if !processed_text.is_empty() {
-                let is_in_viewport = line_num >= current_line && line_num < current_line + visible_lines;
-                let color = if is_in_viewport { 
-                    egui::Color32::from_gray(200) 
-                } else { 
-                    egui::Color32::from_gray(150) 
-                };
-
-                let mut job = egui::text::LayoutJob::default();
-                job.append(
-                    &processed_text,
-                    0.0,
-                    egui::TextFormat {
-                        font_id: egui::FontId::monospace(mini_font_size),
-                        color,
-                        ..Default::default()
-                    },
+        // 创建用于文本显示的滚动区域
+        egui::ScrollArea::vertical()
+            .max_height(available_height)
+            .show(ui, |ui| {
+                // 设置字体
+                ui.style_mut().text_styles.insert(
+                    egui::TextStyle::Body,
+                    egui::FontId::monospace(mini_font_size)
                 );
-                job.wrap = egui::text::TextWrapping {
-                    max_width: f32::INFINITY,
-                    ..Default::default()
-                };
-                
-                let galley = painter.layout_job(job);
-                painter.galley(egui::pos2(rect.left() + 5.0, y_pos), galley, color);
-            }
-        }
+
+                // 创建垂直布局
+                ui.vertical(|ui| {
+                    ui.spacing_mut().item_spacing = egui::Vec2::new(0.0, 2.0);
+
+                    for (idx, line_text) in lines.iter().enumerate() {
+                        let line_num = start_line + idx;
+
+                        // 处理文本
+                        let processed_text = line_text
+                            .split('\n').next().unwrap_or("")
+                            .trim_end_matches('\r')
+                            .chars()
+                            .take(50)
+                            .collect::<String>();
+
+                        if processed_text.is_empty() {
+                            ui.label(""); // 空行
+                            continue;
+                        }
+
+                        // 判断是否在视口中
+                        let is_in_viewport = line_num >= current_line && line_num < current_line + visible_lines;
+
+                        // 创建富文本
+                        let text_color = if is_in_viewport {
+                            egui::Color32::from_gray(200)
+                        } else {
+                            egui::Color32::from_gray(150)
+                        };
+
+                        // 使用富文本渲染
+                        let rich_text = egui::RichText::new(processed_text)
+                            .family(egui::FontFamily::Monospace)
+                            .size(mini_font_size)
+                            .color(text_color);
+
+                        // 渲染文本行
+                        ui.label(rich_text);
+                    }
+                });
+            });
 
         // 绘制当前视口高亮
         let viewport_start_relative = current_line.saturating_sub(start_line);
         let viewport_end_relative = (current_line + visible_lines).saturating_sub(start_line);
-        
+
         let viewport_top = rect.top() + 10.0 + viewport_start_relative as f32 * line_height;
         let viewport_bottom = rect.top() + 10.0 + viewport_end_relative as f32 * line_height;
         let viewport_height = (viewport_bottom - viewport_top).max(8.0);
@@ -133,6 +142,7 @@ impl MiniMap {
             egui::vec2(rect.width() - 4.0, viewport_height),
         );
 
+        let painter = ui.painter();
         painter.rect_filled(
             viewport_rect,
             2.0,
@@ -144,7 +154,6 @@ impl MiniMap {
             egui::Stroke::new(2.0, egui::Color32::WHITE),
         );
     }
-
     /// 处理点击事件
     fn handle_click(
         &self,
