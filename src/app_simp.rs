@@ -30,7 +30,6 @@ impl MiniMap {
         rect: egui::Rect,
         current_line: usize,
         visible_lines: usize,
-        font_size: f32,
         text_cache: &mut TextCache,
     ) -> Option<usize> {
         let total_lines = text_cache.total_lines();
@@ -50,12 +49,14 @@ impl MiniMap {
         let end_line = (current_line + visible_lines + half_range).min(total_lines);
 
         // 渲染文本
-        self.render_text(ui, rect, start_line, end_line, current_line, visible_lines, font_size, text_cache);
+        self.render_text(ui, rect, start_line, end_line, current_line, visible_lines, text_cache);
 
         // 处理点击
         self.handle_click(ui, rect, start_line, end_line, total_lines)
     }
 
+    /// 渲染文本内容
+    /// 渲染文本内容
     /// 渲染文本内容
     /// 渲染文本内容
     fn render_text(
@@ -66,94 +67,49 @@ impl MiniMap {
         end_line: usize,
         current_line: usize,
         visible_lines: usize,
-        font_size: f32,
         text_cache: &mut TextCache,
     ) {
-        let available_height = rect.height() - 20.0;
+
+        let mini_font_size = 2.0;  // 更小的字体
+        let available_height = rect.height();
         let actual_range = end_line - start_line;
         let line_height = available_height / actual_range as f32;
-        let mini_font_size = (font_size * 0.3).max(4.0);
+
 
         // 批量获取文本行
         let lines = text_cache.get_lines(start_line, end_line);
 
-        // 创建用于文本显示的滚动区域
-        egui::ScrollArea::vertical()
-            .max_height(available_height)
-            .show(ui, |ui| {
-                // 设置字体
-                ui.style_mut().text_styles.insert(
-                    egui::TextStyle::Body,
-                    egui::FontId::monospace(mini_font_size)
-                );
+        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(rect), |ui| {
+            ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing = egui::Vec2::new(0.0, 0.15);  // 减少行间距
 
-                // 创建垂直布局
-                ui.vertical(|ui| {
-                    ui.spacing_mut().item_spacing = egui::Vec2::new(0.0, 2.0);
+                for (idx, line_text) in lines.iter().enumerate() {
+                    let line_num = start_line + idx;
+                    let is_in_viewport = line_num >= current_line && line_num < current_line + visible_lines;
 
-                    for (idx, line_text) in lines.iter().enumerate() {
-                        let line_num = start_line + idx;
+                    // 更鲜明的颜色对比
+                    let text_color = if is_in_viewport {
+                        egui::Color32::from_gray(240)  // 更亮的颜色
+                    } else {
+                        egui::Color32::from_gray(100)  // 更暗的颜色，增强对比度
+                    };
 
-                        // 处理文本
-                        let processed_text = line_text
-                            .split('\n').next().unwrap_or("")
-                            .trim_end_matches('\r')
-                            .chars()
-                            .take(50)
-                            .collect::<String>();
+                    // 富文本设置
+                    let rich_text = egui::RichText::new(
+                        if line_text.trim().is_empty() { " " } else { line_text.trim_end_matches('\n') }
+                    )
+                        .font(egui::FontId::monospace(mini_font_size))
+                        .color(text_color)
+                        .strong();  // 加粗提高锐度
 
-                        if processed_text.is_empty() {
-                            ui.label(""); // 空行
-                            continue;
-                        }
+                    ui.add(egui::Label::new(rich_text)
+                        .wrap_mode(egui::TextWrapMode::Extend));
 
-                        // 判断是否在视口中
-                        let is_in_viewport = line_num >= current_line && line_num < current_line + visible_lines;
-
-                        // 创建富文本
-                        let text_color = if is_in_viewport {
-                            egui::Color32::from_gray(200)
-                        } else {
-                            egui::Color32::from_gray(150)
-                        };
-
-                        // 使用富文本渲染
-                        let rich_text = egui::RichText::new(processed_text)
-                            .family(egui::FontFamily::Monospace)
-                            .size(mini_font_size)
-                            .color(text_color);
-
-                        // 渲染文本行
-                        ui.label(rich_text);
-                    }
-                });
+                }
             });
-
-        // 绘制当前视口高亮
-        let viewport_start_relative = current_line.saturating_sub(start_line);
-        let viewport_end_relative = (current_line + visible_lines).saturating_sub(start_line);
-
-        let viewport_top = rect.top() + 10.0 + viewport_start_relative as f32 * line_height;
-        let viewport_bottom = rect.top() + 10.0 + viewport_end_relative as f32 * line_height;
-        let viewport_height = (viewport_bottom - viewport_top).max(8.0);
-
-        let viewport_rect = egui::Rect::from_min_size(
-            egui::pos2(rect.left() + 2.0, viewport_top),
-            egui::vec2(rect.width() - 4.0, viewport_height),
-        );
-
-        let painter = ui.painter();
-        painter.rect_filled(
-            viewport_rect,
-            2.0,
-            egui::Color32::from_rgba_unmultiplied(255, 255, 255, 40),
-        );
-        painter.rect_stroke(
-            viewport_rect,
-            2.0,
-            egui::Stroke::new(2.0, egui::Color32::WHITE),
-        );
+        });
     }
+
     /// 处理点击事件
     fn handle_click(
         &self,
@@ -253,6 +209,16 @@ impl Default for TextViewerAppSimp {
 }
 
 impl TextViewerAppSimp {
+    fn input_new_file(&mut self, ctx: &egui::Context) {
+        ctx.input(|i| {
+            if let Some(file) = i.raw.dropped_files.get(0) {
+                if let Some(path) = &file.path {
+                    self.open_file(path.clone());
+                }
+            }
+        });
+    }
+
     /// 打开文件
     fn open_file(&mut self, path: PathBuf) {
         match FileReader::new(path.clone(), encoding_rs::UTF_8) {
@@ -363,7 +329,6 @@ impl TextViewerAppSimp {
                 minimap_rect,
                 self.scroll.line,
                 self.scroll.visible_lines,
-                self.view.font_size,
                 &mut self.text_cache,
             ) {
                 self.scroll.jump_to(target_line);
@@ -556,6 +521,9 @@ impl TextViewerAppSimp {
 
 impl eframe::App for TextViewerAppSimp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // 检测拖拽文件
+        self.input_new_file(ctx);
+
         self.render_menu_bar(ctx);
         self.render_status_bar(ctx);
         self.render_text_area(ctx);
