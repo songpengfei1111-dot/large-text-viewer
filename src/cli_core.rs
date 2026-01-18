@@ -70,18 +70,7 @@ pub enum Commands {
         #[arg(short, long, default_value = "0")]
         context: usize,
     },
-    /// Get specific byte range from file
-    Bytes {
-        /// Path to the text file
-        #[arg(short, long)]
-        file: PathBuf,
-        /// Start byte offset
-        #[arg(short, long)]
-        start: usize,
-        /// End byte offset
-        #[arg(short, long)]
-        end: usize,
-    },
+
 }
 
 pub struct CliProcessor {
@@ -97,7 +86,7 @@ impl Default for CliProcessor {
 impl CliProcessor {
     pub fn new() -> Self {
         Self {
-            text_cache: TextCache::new(10000), // 更大的缓存用于CLI操作
+            text_cache: TextCache::new(100000), // 更大的缓存用于CLI操作
         }
     }
 
@@ -112,9 +101,6 @@ impl CliProcessor {
             }
             Commands::Search { file, pattern, regex, case_sensitive, count_only, max_results, context } => {
                 self.handle_search(file, pattern, regex, case_sensitive, count_only, max_results, context)
-            }
-            Commands::Bytes { file, start, end } => {
-                self.handle_bytes(file, start, end)
             }
         }
     }
@@ -273,23 +259,7 @@ impl CliProcessor {
         Ok(())
     }
 
-    /// 处理字节范围命令
-    fn handle_bytes(&mut self, file_path: PathBuf, start: usize, end: usize) -> Result<()> {
-        let reader = FileReader::new(file_path, encoding_rs::UTF_8)?;
-        
-        if start >= reader.len() {
-            println!("Start offset {} exceeds file size ({} bytes)", start, reader.len());
-            return Ok(());
-        }
-        
-        let actual_end = end.min(reader.len());
-        let chunk = reader.get_chunk(start, actual_end);
-        
-        println!("Bytes {}..{} ({} bytes):", start, actual_end, actual_end - start);
-        println!("{}", chunk);
-        
-        Ok(())
-    }
+
 }
 
 /// CLI入口函数
