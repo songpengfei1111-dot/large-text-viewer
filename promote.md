@@ -5,3 +5,5 @@
 // search bar 用迭代器，next搜索下一个
 
 
+# 最简洁快速的方法
+rg -n '^' file.txt | head -20

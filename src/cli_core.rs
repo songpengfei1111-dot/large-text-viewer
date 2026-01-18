@@ -192,7 +192,7 @@ impl CliProcessor {
         let mut search_engine = SearchEngine::new();
         search_engine.set_query(pattern.clone(), use_regex, case_sensitive);
         
-        let (tx, rx) = mpsc::sync_channel(1000);
+        let (tx, rx) = mpsc::sync_channel(10_000);
         let cancel_token = Arc::new(AtomicBool::new(false));
         
         if count_only {
@@ -202,6 +202,7 @@ impl CliProcessor {
             let mut total_count = 0;
             loop {
                 match rx.recv() {
+                    // 匹配信息
                     Ok(SearchMessage::CountResult(count)) => {
                         total_count += count;
                     }
@@ -247,6 +248,7 @@ impl CliProcessor {
                                         println!("{} {:6}: {}", prefix, ctx_line + 1, clean_text);
                                     }
                                 }
+                                // }
                             }
                             
                             results_shown += 1;

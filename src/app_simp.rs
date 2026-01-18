@@ -1,10 +1,13 @@
 use eframe::egui;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::mpsc::Receiver;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use large_text_core::file_reader::FileReader;
 use large_text_core::line_indexer::LineIndexer;
 use large_text_core::text_cache::TextCache;
+use large_text_core::search_engine::{SearchEngine, SearchMessage, SearchResult, SearchType};
 
 
 /// 精简的Minimap，只与TextCache交互
@@ -56,9 +59,6 @@ impl MiniMap {
     }
 
     /// 渲染文本内容
-    /// 渲染文本内容
-    /// 渲染文本内容
-    /// 渲染文本内容
     fn render_text(
         &self,
         ui: &mut egui::Ui,
@@ -73,7 +73,7 @@ impl MiniMap {
         let mini_font_size = 2.0;  // 更小的字体
         let available_height = rect.height();
         let actual_range = end_line - start_line;
-        let line_height = available_height / actual_range as f32;
+        let _line_height = available_height / actual_range as f32;
 
 
         // 批量获取文本行
@@ -137,6 +137,57 @@ impl MiniMap {
     }
 }
 
+/// 简化的搜索状态
+struct SearchState {
+    query: String,
+    results: Vec<SearchResult>,
+    current_index: usize,
+    total_results: usize,
+    in_progress: bool,
+    message_rx: Option<Receiver<SearchMessage>>,
+    cancellation_token: Option<Arc<AtomicBool>>,
+    show_bar: bool,
+    use_regex: bool,
+    case_sensitive: bool,
+    count_done: bool,    // 计数任务是否完成
+    fetch_done: bool,    // 获取任务是否完成
+    is_find_all: bool,   // 是否是 Find All 模式
+}
+
+impl Default for SearchState {
+    fn default() -> Self {
+        Self {
+            query: String::new(),
+            results: Vec::new(),
+            current_index: 0,
+            total_results: 0,
+            in_progress: false,
+            message_rx: None,
+            cancellation_token: None,
+            show_bar: false,
+            use_regex: false,
+            case_sensitive: false,
+            count_done: false,
+            fetch_done: false,
+            is_find_all: false,
+        }
+    }
+}
+
+impl SearchState {
+    fn reset(&mut self) {
+        self.results.clear();
+        self.current_index = 0;
+        self.total_results = 0;
+        self.in_progress = false;
+        self.message_rx = None;
+        self.cancellation_token = None;
+        self.count_done = false;
+        self.fetch_done = false;
+        self.is_find_all = false;
+    }
+}
+
 /// 简化的滚动状态
 struct ScrollState {
     line: usize,
@@ -190,9 +241,12 @@ impl Default for ViewSettings {
 /// 精简的文本查看器应用
 pub struct TextViewerAppSimp {
     text_cache: TextCache,
+    line_indexer: LineIndexer,
     minimap: MiniMap,
     scroll: ScrollState,
     view: ViewSettings,
+    search: SearchState,
+    search_engine: SearchEngine,
     status_message: String,
 }
 
@@ -200,9 +254,12 @@ impl Default for TextViewerAppSimp {
     fn default() -> Self {
         Self {
             text_cache: TextCache::new(2000), // 缓存2000行
+            line_indexer: LineIndexer::new(),
             minimap: MiniMap::default(),
             scroll: ScrollState::default(),
             view: ViewSettings::default(),
+            search: SearchState::default(),
+            search_engine: SearchEngine::new(),
             status_message: String::new(),
         }
     }
@@ -223,11 +280,14 @@ impl TextViewerAppSimp {
     fn open_file(&mut self, path: PathBuf) {
         match FileReader::new(path.clone(), encoding_rs::UTF_8) {
             Ok(reader) => {
-                let mut indexer = LineIndexer::new();
-                indexer.index_file(&reader);
-                
-                self.text_cache.set_file(Arc::new(reader), indexer);
+                self.line_indexer.index_file(&reader);
+                // 创建一个新的 LineIndexer 来传递给 TextCache
+                let mut cache_indexer = LineIndexer::new();
+                cache_indexer.index_file(&reader);
+                self.text_cache.set_file(Arc::new(reader), cache_indexer);
                 self.scroll.reset();
+                self.search.reset();
+                self.search_engine.clear();
                 self.status_message = format!("Opened: {}", path.display());
             }
             Err(e) => {
@@ -259,11 +319,565 @@ impl TextViewerAppSimp {
                     ui.label("Font Size:");
                     ui.add(egui::Slider::new(&mut self.view.font_size, 8.0..=32.0));
                 });
+
+                ui.menu_button("Search", |ui| {
+                    if ui.button("Find (Ctrl+F)").clicked() {
+                        self.search.show_bar = true;
+                        ui.close_menu();
+                    }
+                    ui.separator();
+                    ui.checkbox(&mut self.search.use_regex, "Use Regex");
+                    ui.checkbox(&mut self.search.case_sensitive, "Match Case");
+                });
             });
         });
     }
 
-    /// 渲染状态栏
+    /// 渲染搜索栏
+    fn render_search_bar(&mut self, ctx: &egui::Context) {
+        if !self.search.show_bar {
+            return;
+        }
+
+        egui::TopBottomPanel::bottom("search_bar").show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.label("Search:");
+                let response = ui.add(
+                    egui::TextEdit::singleline(&mut self.search.query)
+                        .desired_width(300.0)
+                        .hint_text("Enter search term...")
+                );
+
+                if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    self.perform_search_single();
+                }
+
+                ui.checkbox(&mut self.search.case_sensitive, "Aa")
+                    .on_hover_text("Match Case");
+                ui.checkbox(&mut self.search.use_regex, ".*")
+                    .on_hover_text("Use Regex");
+
+                if ui.add_enabled(!self.search.in_progress, egui::Button::new("🔍 Find")).clicked() {
+                    self.perform_search_single();
+                }
+
+                if ui.add_enabled(!self.search.in_progress, egui::Button::new("🔎 Find All")).clicked() {
+                    self.perform_search_all();
+                }
+
+                if self.search.total_results > 0 {
+                    if ui.button("⬆ Previous").clicked() {
+                        self.go_to_previous_result();
+                    }
+                    if ui.button("⬇ Next").clicked() {
+                        self.go_to_next_result();
+                    }
+
+                    let current = (self.search.current_index + 1).min(self.search.total_results);
+                    ui.label(format!("{}/{}", current, self.search.total_results));
+                }
+
+                if self.search.in_progress {
+                    ui.spinner();
+                    ui.label("Searching...");
+                    if ui.button("Stop").clicked() {
+                        if let Some(token) = &self.search.cancellation_token {
+                            token.store(true, Ordering::Relaxed);
+                        }
+                        self.search.in_progress = false;
+                    }
+                }
+
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("✖").clicked() {
+                        self.search.show_bar = false;
+                    }
+                });
+            });
+        });
+    }
+
+    /// 执行单个搜索（只找第一个匹配）
+    fn perform_search_single(&mut self) {
+        self.perform_search_internal(false);
+    }
+
+    /// 执行全部搜索（找所有匹配）
+    fn perform_search_all(&mut self) {
+        self.perform_search_internal(true);
+    }
+
+    /// 执行搜索的内部实现
+    fn perform_search_internal(&mut self, find_all: bool) {
+        if self.search.query.is_empty() {
+            self.status_message = "Enter a search query first".to_string();
+            return;
+        }
+
+        let Some(reader) = self.text_cache.get_file_reader() else {
+            self.status_message = "Open a file before searching".to_string();
+            return;
+        };
+
+        if self.search.in_progress {
+            return;
+        }
+
+        self.search.reset();
+        self.search.is_find_all = find_all;
+        self.search_engine.clear();
+        self.search_engine.set_query(
+            self.search.query.clone(),
+            self.search.use_regex,
+            self.search.case_sensitive,
+        );
+
+        let reader_arc = reader.clone();
+        let (tx, rx) = std::sync::mpsc::sync_channel(10_000); // 增加缓冲区大小
+        self.search.message_rx = Some(rx);
+        self.search.in_progress = true;
+
+        let cancel_token = Arc::new(AtomicBool::new(false));
+        self.search.cancellation_token = Some(cancel_token.clone());
+
+        let query = self.search.query.clone();
+        let use_regex = self.search.use_regex;
+        let case_sensitive = self.search.case_sensitive;
+
+        if find_all {
+            // Find All: 启动两个任务
+            // 1. 计数任务：统计所有匹配的数量
+            let tx_count = tx.clone();
+            let reader_count = reader_arc.clone();
+            let query_count = query.clone();
+            let cancel_token_count = cancel_token.clone();
+
+            std::thread::spawn(move || {
+                let mut engine = SearchEngine::new();
+                engine.set_query(query_count, use_regex, case_sensitive);
+                engine.count_matches(reader_count, tx_count, cancel_token_count);
+            });
+
+            // 2. 获取任务：获取第一页结果（1000个）
+            let tx_fetch = tx.clone();
+            let reader_fetch = reader_arc.clone();
+            let query_fetch = query.clone();
+            let cancel_token_fetch = cancel_token.clone();
+
+            std::thread::spawn(move || {
+                let mut engine = SearchEngine::new();
+                engine.set_query(query_fetch, use_regex, case_sensitive);
+                // 只获取第一页的1000个结果，而不是所有结果
+                engine.fetch_matches(reader_fetch, tx_fetch, 0, 1000, cancel_token_fetch);
+            });
+
+            self.status_message = "Searching all matches...".to_string();
+        } else {
+            // Find: 只查找第一个匹配
+            std::thread::spawn(move || {
+                let mut engine = SearchEngine::new();
+                engine.set_query(query, use_regex, case_sensitive);
+                engine.fetch_matches(reader_arc, tx, 0, 1, cancel_token);
+            });
+
+            self.status_message = "Searching first match...".to_string();
+        }
+    }
+
+    /// 轮询搜索结果
+    fn poll_search_results(&mut self) {
+        if !self.search.in_progress {
+            return;
+        }
+
+        let mut new_results_added = false;
+        let mut channel_disconnected = false;
+        
+        if let Some(ref rx) = self.search.message_rx {
+            // 处理所有可用的消息
+            loop {
+                match rx.try_recv() {
+                    Ok(msg) => {
+                        match msg {
+                            SearchMessage::CountResult(count) => {
+                                self.search.total_results += count;
+                                if self.search.is_find_all {
+                                    self.status_message = format!("Found {} matches...", self.search.total_results);
+                                }
+                            }
+                            SearchMessage::ChunkResult(chunk_result) => {
+                                self.search.results.extend(chunk_result.matches);
+                                new_results_added = true;
+                                
+                                // 动态显示当前结果数量
+                                if self.search.is_find_all {
+                                    self.status_message = format!("Found {} matches...", self.search.results.len());
+                                }
+                            }
+                            SearchMessage::Done(search_type) => {
+                                match search_type {
+                                    SearchType::Count => {
+                                        self.search.count_done = true;
+                                        println!("Count task completed, total: {}", self.search.total_results);
+                                    }
+                                    SearchType::Fetch => {
+                                        self.search.fetch_done = true;
+                                        println!("Fetch task completed, results: {}", self.search.results.len());
+                                    }
+                                }
+
+                                // 对于Find All模式，当计数和获取任务都完成时，搜索就完成了
+                                // 不需要等待获取所有结果，因为我们只获取第一页
+                                if self.search.is_find_all && self.search.count_done && self.search.fetch_done {
+                                    // 取消任何剩余的任务
+                                    if let Some(token) = &self.search.cancellation_token {
+                                        token.store(true, Ordering::Relaxed);
+                                    }
+                                }
+                            }
+                            SearchMessage::Error(e) => {
+                                self.search.in_progress = false;
+                                self.search.message_rx = None;
+                                self.status_message = format!("Search failed: {}", e);
+                                println!("Search error: {}", e);
+                                return; // 停止处理消息
+                            }
+                        }
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {
+                        // 没有更多消息，退出循环
+                        break;
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        // 通道断开，搜索完成
+                        channel_disconnected = true;
+                        break;
+                    }
+                }
+            }
+        }
+
+        // 如果通道断开，完成搜索
+        if channel_disconnected {
+            self.finalize_search();
+        }
+
+        if new_results_added {
+            // 每帧处理完所有可用块后只排序一次
+            self.search.results.sort_by_key(|r| r.byte_offset);
+            
+            // 如果这是第一批结果，跳转到第一个匹配
+            if self.search.current_index == 0 && !self.search.results.is_empty() {
+                self.jump_to_current_result();
+            }
+        }
+    }
+
+    /// 完成搜索的最终处理
+    fn finalize_search(&mut self) {
+        self.search.in_progress = false;
+        self.search.message_rx = None;
+        
+        // 最终排序确保结果有序
+        self.search.results.sort_by_key(|r| r.byte_offset);
+        
+        // 设置最终的总结果数
+        if !self.search.is_find_all {
+            self.search.total_results = self.search.results.len();
+        } else {
+            // 确保总数至少是我们获取到的结果数
+            self.search.total_results = self.search.total_results.max(self.search.results.len());
+        }
+        
+        let total = self.search.total_results;
+        if total > 0 {
+            if self.search.is_find_all {
+                self.status_message = format!("Found {} matches", total);
+            } else {
+                self.status_message = "Showing first match. Run Find All to see every result.".to_string();
+            }
+            
+            // 跳转到第一个结果
+            if !self.search.results.is_empty() {
+                self.jump_to_current_result();
+            }
+        } else {
+            self.status_message = "No matches found".to_string();
+        }
+        
+        println!("Search completed: {} results", total);
+    }
+
+    /// 跳转到下一个搜索结果
+    fn go_to_next_result(&mut self) {
+        if self.search.results.is_empty() {
+            return;
+        }
+        self.search.current_index = (self.search.current_index + 1) % self.search.results.len();
+        self.jump_to_current_result();
+    }
+
+    /// 跳转到上一个搜索结果
+    fn go_to_previous_result(&mut self) {
+        if self.search.results.is_empty() {
+            return;
+        }
+        self.search.current_index = if self.search.current_index == 0 {
+            self.search.results.len() - 1
+        } else {
+            self.search.current_index - 1
+        };
+        self.jump_to_current_result();
+    }
+
+    /// 跳转到当前搜索结果
+    fn jump_to_current_result(&mut self) {
+        if let Some(result) = self.search.results.get(self.search.current_index) {
+            let target_line = self.line_indexer.find_line_at_offset(result.byte_offset);
+            self.scroll.jump_to(target_line);
+        }
+    }
+
+    /// 渲染搜索结果面板
+    fn render_search_results_panel(&mut self, ctx: &egui::Context) {
+        // 只有在搜索栏打开且有搜索结果或正在搜索时才显示面板
+        if !self.search.show_bar || (self.search.results.is_empty() && !self.search.in_progress) {
+            return;
+        }
+
+        egui::SidePanel::left("search_results")
+            .default_width(400.0)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.heading("Find Results");
+
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("✖").clicked() {
+                            self.search.show_bar = false;
+                        }
+                    });
+                });
+
+                ui.separator();
+
+                // 显示搜索统计信息
+                if self.search.in_progress {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        if self.search.total_results > 0 {
+                            ui.label(format!(
+                                "Found {} occurrences of '{}'...",
+                                self.search.total_results, self.search.query
+                            ));
+                        } else {
+                            ui.label("Searching...");
+                        }
+                    });
+                } else if self.search.total_results > 0 {
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "Found {} occurrences of '{}'.",
+                            self.search.total_results, self.search.query
+                        ))
+                        .strong(),
+                    );
+                } else if !self.search.query.is_empty() {
+                    ui.label("No matches found");
+                }
+
+                ui.separator();
+
+                // 渲染搜索结果列表
+                if !self.search.results.is_empty() {
+                    self.render_search_results_list(ui);
+                }
+            });
+    }
+
+    /// 渲染搜索结果列表（使用虚拟滚动）
+    fn render_search_results_list(&mut self, ui: &mut egui::Ui) {
+        let reader = match self.text_cache.get_file_reader() {
+            Some(r) => r.clone(),
+            None => return,
+        };
+
+        let text_height = ui.text_style_height(&egui::TextStyle::Monospace);
+        let total_results = self.search.results.len();
+        let current_index = self.search.current_index;
+
+        if total_results == 0 {
+            return;
+        }
+
+        // 使用 egui 的虚拟滚动功能
+        egui::ScrollArea::both()
+            .auto_shrink([false; 2])
+            .show_rows(
+                ui,
+                text_height,
+                total_results,
+                |ui, row_range| {
+                    // 只为可见的行准备数据
+                    for idx in row_range {
+                        if idx >= total_results {
+                            break;
+                        }
+
+                        let result = &self.search.results[idx];
+                        let is_current = idx == current_index;
+                        let line_num = self.line_indexer.find_line_at_offset(result.byte_offset);
+                        
+                        // 懒加载：只为可见行读取文本内容
+                        let (line_text, match_start, match_end) = self.get_search_result_text(&reader, result);
+                        
+                        // 构建带高亮的文本
+                        let job = self.build_search_result_job(
+                            &line_text,
+                            line_num,
+                            match_start,
+                            match_end,
+                            is_current,
+                        );
+
+                        let response = ui.selectable_label(is_current, job);
+
+                        // 点击跳转到该结果
+                        if response.clicked() {
+                            self.search.current_index = idx;
+                            self.jump_to_current_result();
+                        }
+                    }
+                },
+            );
+    }
+
+    /// 获取搜索结果的文本内容（懒加载）
+    fn get_search_result_text(&self, reader: &Arc<FileReader>, result: &SearchResult) -> (String, usize, usize) {
+        // 读取匹配周围的上下文
+        let context_size = 500;
+        let read_start = result.byte_offset.saturating_sub(context_size);
+        let read_end = (result.byte_offset + result.match_len + context_size).min(reader.len());
+        let chunk = reader.get_chunk(read_start, read_end);
+        
+        // 找到匹配在 chunk 中的位置
+        let match_offset_in_chunk = result.byte_offset - read_start;
+        
+        // 提取一行文本（从换行符到换行符）
+        let line_start_in_chunk = chunk[..match_offset_in_chunk]
+            .rfind('\n')
+            .map(|pos| pos + 1)
+            .unwrap_or(0);
+        
+        let line_end_in_chunk = chunk[match_offset_in_chunk..]
+            .find('\n')
+            .map(|pos| match_offset_in_chunk + pos)
+            .unwrap_or(chunk.len());
+        
+        let line_text = chunk[line_start_in_chunk..line_end_in_chunk].to_string();
+        
+        // 匹配在 line_text 中的位置
+        let match_start_in_line = match_offset_in_chunk - line_start_in_chunk;
+        let match_end_in_line = match_start_in_line + result.match_len;
+        
+        (line_text, match_start_in_line, match_end_in_line)
+    }
+
+    /// 构建搜索结果的文本作业
+    fn build_search_result_job(
+        &self,
+        line_text: &str,
+        line_num: usize,
+        match_start: usize,
+        match_end: usize,
+        is_current: bool,
+    ) -> egui::text::LayoutJob {
+        let mut job = egui::text::LayoutJob::default();
+        job.wrap.max_width = f32::INFINITY; // 禁止换行
+
+        // 文本颜色
+        let text_color = egui::Color32::LIGHT_GRAY;
+        let line_num_color = egui::Color32::GRAY;
+
+        let highlight_bg = if is_current {
+            egui::Color32::from_rgb(80, 80, 120) // 当前选中的结果
+        } else {
+            egui::Color32::from_rgb(60, 60, 40) // 普通高亮
+        };
+
+        // 行号
+        job.append(
+            &format!("Line {:8}    ", line_num + 1),
+            0.0,
+            egui::TextFormat {
+                font_id: egui::FontId::monospace(self.view.font_size),
+                color: line_num_color,
+                ..Default::default()
+            },
+        );
+
+        // 安全地分割文本
+        let safe_start = match_start.min(line_text.len());
+        let safe_end = match_end.min(line_text.len());
+
+        // 匹配前的文本
+        if safe_start > 0 {
+            job.append(
+                &line_text[..safe_start],
+                0.0,
+                egui::TextFormat {
+                    font_id: egui::FontId::monospace(self.view.font_size),
+                    color: text_color,
+                    ..Default::default()
+                },
+            );
+        }
+
+        // 匹配的文本（高亮）
+        if safe_start < safe_end && safe_end <= line_text.len() {
+            job.append(
+                &line_text[safe_start..safe_end],
+                0.0,
+                egui::TextFormat {
+                    font_id: egui::FontId::monospace(self.view.font_size),
+                    color: egui::Color32::WHITE,
+                    background: highlight_bg,
+                    ..Default::default()
+                },
+            );
+        }
+
+        // 匹配后的文本
+        if safe_end < line_text.len() {
+            job.append(
+                &line_text[safe_end..],
+                0.0,
+                egui::TextFormat {
+                    font_id: egui::FontId::monospace(self.view.font_size),
+                    color: text_color,
+                    ..Default::default()
+                },
+            );
+        }
+
+        job
+    }
+    fn handle_keyboard_shortcuts(&mut self, ctx: &egui::Context) {
+        // Ctrl+F / Cmd+F: 切换搜索栏
+        if ctx.input_mut(|i| {
+            i.consume_key(egui::Modifiers::CTRL, egui::Key::F)
+                || i.consume_key(egui::Modifiers::MAC_CMD, egui::Key::F)
+        }) {
+            self.search.show_bar = !self.search.show_bar;
+        }
+
+        // Escape: 关闭搜索栏
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
+            if self.search.show_bar {
+                self.search.show_bar = false;
+            }
+        }
+    }
+
     fn render_status_bar(&self, ctx: &egui::Context) {
         egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
             ui.horizontal(|ui| {
@@ -502,11 +1116,17 @@ impl TextViewerAppSimp {
             // 文本内容 - 从TextCache获取
             if let Some(line_text) = self.text_cache.get_line(line_num) {
                 let text = line_text.trim_end_matches('\n').trim_end_matches('\r');
-                ui.add(egui::Label::new(
-                    egui::RichText::new(text)
-                        .monospace()
-                        .size(self.view.font_size)
-                ).extend());
+                
+                // 检查是否有搜索结果需要高亮
+                if !self.search.results.is_empty() && !self.search.query.is_empty() {
+                    self.render_line_with_highlights(ui, text, line_num);
+                } else {
+                    ui.add(egui::Label::new(
+                        egui::RichText::new(text)
+                            .monospace()
+                            .size(self.view.font_size)
+                    ).extend());
+                }
             } else {
                 // 如果缓存中没有，显示空行
                 ui.add(egui::Label::new(
@@ -517,6 +1137,70 @@ impl TextViewerAppSimp {
             }
         });
     }
+
+    /// 渲染带高亮的行
+    fn render_line_with_highlights(&mut self, ui: &mut egui::Ui, line_text: &str, _line_num: usize) {
+        // 使用搜索引擎在当前行中查找匹配
+        let matches = self.search_engine.find_in_text(line_text);
+        
+        if matches.is_empty() {
+            // 没有匹配，正常渲染
+            ui.add(egui::Label::new(
+                egui::RichText::new(line_text)
+                    .monospace()
+                    .size(self.view.font_size)
+            ).extend());
+            return;
+        }
+
+        // 构建带高亮的文本
+        let mut job = egui::text::LayoutJob::default();
+        let mut last_end = 0;
+
+        for (start, end) in matches {
+            // 添加匹配前的文本
+            if start > last_end {
+                job.append(
+                    &line_text[last_end..start],
+                    0.0,
+                    egui::TextFormat {
+                        font_id: egui::FontId::monospace(self.view.font_size),
+                        color: egui::Color32::LIGHT_GRAY,
+                        ..Default::default()
+                    },
+                );
+            }
+
+            // 添加高亮的匹配文本
+            job.append(
+                &line_text[start..end],
+                0.0,
+                egui::TextFormat {
+                    font_id: egui::FontId::monospace(self.view.font_size),
+                    color: egui::Color32::BLACK,
+                    background: egui::Color32::YELLOW,
+                    ..Default::default()
+                },
+            );
+
+            last_end = end;
+        }
+
+        // 添加剩余文本
+        if last_end < line_text.len() {
+            job.append(
+                &line_text[last_end..],
+                0.0,
+                egui::TextFormat {
+                    font_id: egui::FontId::monospace(self.view.font_size),
+                    color: egui::Color32::LIGHT_GRAY,
+                    ..Default::default()
+                },
+            );
+        }
+
+        ui.add(egui::Label::new(job).extend());
+    }
 }
 
 impl eframe::App for TextViewerAppSimp {
@@ -524,8 +1208,22 @@ impl eframe::App for TextViewerAppSimp {
         // 检测拖拽文件
         self.input_new_file(ctx);
 
+        // 处理键盘快捷键
+        self.handle_keyboard_shortcuts(ctx);
+
+        // 轮询搜索结果
+        self.poll_search_results();
+
+        // 渲染UI
         self.render_menu_bar(ctx);
+        self.render_search_bar(ctx);
+        self.render_search_results_panel(ctx); // 添加搜索结果面板
         self.render_status_bar(ctx);
         self.render_text_area(ctx);
+
+        // 保持搜索动画
+        if self.search.in_progress {
+            ctx.request_repaint();
+        }
     }
 }
