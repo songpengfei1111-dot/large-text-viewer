@@ -64,13 +64,12 @@ pub enum Commands {
         #[arg(long)]
         count_only: bool,
         /// Maximum number of results to show
-        #[arg(long, default_value = "100")]
+        #[arg(long, default_value = "50")]
         max_results: usize,
         /// Show context lines around matches
         #[arg(short, long, default_value = "0")]
         context: usize,
     },
-
 }
 
 pub struct CliProcessor {
@@ -168,6 +167,7 @@ impl CliProcessor {
     }
 
     /// 处理搜索命令
+    /// 添加行范围限制，在调用mcp时要先校验结果数量，如果多于指定长度就返回err，重搜，给searchline也添加这个选项，强制显示行号
     fn handle_search(&mut self, file_path: PathBuf, pattern: String, use_regex: bool, case_sensitive: bool, count_only: bool, max_results: usize, context: usize) -> Result<()> {
         let reader = Arc::new(FileReader::new(file_path, encoding_rs::UTF_8)?);
         let mut indexer = LineIndexer::new();
@@ -220,9 +220,8 @@ impl CliProcessor {
                                 let line_num = line_info.line_number;
                                 
                                 // 显示上下文
-                                let start_context = line_num.saturating_sub(context);
-                                let end_context = (line_num + context + 1).min(self.text_cache.total_lines());
-                                
+                                let start_context = if line_num > context { line_num - context } else { 0 };
+                                let end_context = line_num + 1; // 包含目标行本身
                                 if context > 0 && results_shown > 0 {
                                     println!("--");
                                 }

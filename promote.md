@@ -7,3 +7,6 @@
 
 # 最简洁快速的方法
 rg -n '^' file.txt | head -20
+
+client需要重新格式化，减少空格浪费token
+增强api，从某行向上搜索15个
