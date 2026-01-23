@@ -69,6 +69,12 @@ pub enum Commands {
         /// Show context lines around matches
         #[arg(short, long, default_value = "0")]
         context: usize,
+        /// Start line number for filtering results (1-based, optional)
+        #[arg(long)]
+        start: Option<usize>,
+        /// End line number for filtering results (1-based, optional)
+        #[arg(long)]
+        end: Option<usize>,
     },
 }
 
@@ -98,8 +104,8 @@ impl CliProcessor {
             Commands::Lines { file, start, end, count, line_numbers } => {
                 self.handle_lines(file, start, end, count, line_numbers)
             }
-            Commands::Search { file, pattern, regex, case_sensitive, count_only, max_results, context } => {
-                self.handle_search(file, pattern, regex, case_sensitive, count_only, max_results, context)
+            Commands::Search { file, pattern, regex, case_sensitive, count_only, max_results, context, start, end } => {
+                self.handle_search(file, pattern, regex, case_sensitive, count_only, max_results, context, start, end)
             }
         }
     }
@@ -168,12 +174,21 @@ impl CliProcessor {
 
     /// 处理搜索命令
     /// 添加行范围限制，在调用mcp时要先校验结果数量，如果多于指定长度就返回err，重搜，给searchline也添加这个选项，强制显示行号
-    fn handle_search(&mut self, file_path: PathBuf, pattern: String, use_regex: bool, case_sensitive: bool, count_only: bool, max_results: usize, context: usize) -> Result<()> {
+    fn handle_search(&mut self, file_path: PathBuf, pattern: String, use_regex: bool, case_sensitive: bool, count_only: bool, max_results: usize, context: usize, start: Option<usize>, end: Option<usize>) -> Result<()> {
         let reader = Arc::new(FileReader::new(file_path, encoding_rs::UTF_8)?);
         let mut indexer = LineIndexer::new();
         indexer.index_file(&reader);
         
         self.text_cache.set_file(reader.clone(), indexer);
+        
+        // 计算行范围过滤器（转换为0-based）
+        let line_filter = if start.is_some() || end.is_some() {
+            let start = start.map(|n| n.saturating_sub(1)).unwrap_or(0);
+            let end = end.map(|n| n.saturating_sub(1)).unwrap_or(usize::MAX);
+            Some((start, end))
+        } else {
+            None
+        };
         
         let mut search_engine = SearchEngine::new();
         search_engine.set_query(pattern.clone(), use_regex, case_sensitive);
@@ -218,6 +233,13 @@ impl CliProcessor {
                             // 找到匹配所在的行
                             if let Some(line_info) = self.text_cache.get_line_info_by_offset(result.byte_offset) {
                                 let line_num = line_info.line_number;
+                                
+                                // 检查行范围过滤器
+                                if let Some((start, end)) = line_filter {
+                                    if line_num < start || line_num > end {
+                                        continue; // 跳过不在指定范围内的结果
+                                    }
+                                }
                                 
                                 // 显示上下文
                                 let start_context = if line_num > context { line_num - context } else { 0 };
