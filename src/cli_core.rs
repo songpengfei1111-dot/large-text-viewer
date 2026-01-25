@@ -222,6 +222,7 @@ impl CliProcessor {
             search_engine.fetch_matches(reader.clone(), tx, 0, max_results, cancel_token);
             
             let mut results_shown = 0;
+            // TODO 分开finder 和 filter
             loop {
                 match rx.recv() {
                     Ok(SearchMessage::ChunkResult(chunk)) => {
@@ -244,9 +245,7 @@ impl CliProcessor {
                                 // 显示上下文
                                 let start_context = if line_num > context { line_num - context } else { 0 };
                                 let end_context = line_num + 1; // 包含目标行本身
-                                if context > 0 && results_shown > 0 {
-                                    println!("--");
-                                }
+
                                 
                                 for ctx_line in start_context..end_context {
                                     if let Some(line_text) = self.text_cache.get_line(ctx_line) {
@@ -289,3 +288,5 @@ pub fn run_cli() -> Result<()> {
     let mut processor = CliProcessor::new();
     processor.process_command(cli)
 }
+
+//todo 使用标准json返回

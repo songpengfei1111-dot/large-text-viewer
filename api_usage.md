@@ -76,7 +76,7 @@ Lines: 254800
 ./target/release/large-text-viewer search --file /Users/teng/PycharmProjects/pythonProject/tiktok/log/record_00_XG.txt --pattern "8404" --context 3
 
 # 只搜索第10行到第50行之间的匹配
-./target/release/large-text-viewer search -f /Users/teng/PycharmProjects/pythonProject/tiktok/log/record_00_XG.txt -p "string__" --start 10 --end 500
+./target/release/large-text-viewer search -f /Users/teng/PycharmProjects/pythonProject/tiktok/log/record_00_XG.txt -p "string__" --end 500 --start 10 
 ```
 
 搜索输出示例：
