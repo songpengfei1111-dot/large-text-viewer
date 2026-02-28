@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, atomic::{AtomicBool, Ordering}, mpsc};
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-
+use egui::accesskit::Toggled::False;
 use large_text_core::file_reader::{FileReader, detect_encoding};
 use large_text_core::line_indexer::LineIndexer;
 use large_text_core::text_cache::TextCache;
@@ -57,14 +57,8 @@ pub enum Commands {
         /// Use regex pattern
         #[arg(long)]
         regex: bool,
-        /// Case sensitive search
-        #[arg(long)]
-        case_sensitive: bool,
-        /// Only count matches
-        #[arg(long)]
-        count_only: bool,
         /// Maximum number of results to show
-        #[arg(long, default_value = "50")]
+        #[arg(long, default_value = "100")]
         max_results: usize,
         /// Show context lines around matches
         #[arg(short, long, default_value = "0")]
@@ -104,8 +98,8 @@ impl CliProcessor {
             Commands::Lines { file, start, end, count, line_numbers } => {
                 self.handle_lines(file, start, end, count, line_numbers)
             }
-            Commands::Search { file, pattern, regex, case_sensitive, count_only, max_results, context, start, end } => {
-                self.handle_search(file, pattern, regex, case_sensitive, count_only, max_results, context, start, end)
+            Commands::Search { file, pattern, regex, max_results, context, start, end } => {
+                self.handle_search(file, pattern, regex, max_results, context, start, end)
             }
         }
     }
@@ -174,10 +168,10 @@ impl CliProcessor {
 
     /// 处理搜索命令
     /// 添加行范围限制，在调用mcp时要先校验结果数量，如果多于指定长度就返回err，重搜，给searchline也添加这个选项，强制显示行号
-    fn handle_search(&mut self, file_path: PathBuf, pattern: String, use_regex: bool, case_sensitive: bool, count_only: bool, max_results: usize, context: usize, start: Option<usize>, end: Option<usize>) -> Result<()> {
+    fn handle_search(&mut self, file_path: PathBuf, pattern: String, use_regex: bool, max_results: usize, context: usize, start: Option<usize>, end: Option<usize>) -> Result<()> {
         let reader = Arc::new(FileReader::new(file_path, encoding_rs::UTF_8)?);
         let mut indexer = LineIndexer::new();
-        indexer.index_file(&reader);
+        indexer.index_file(&reader); //这里最好有缓冲
         
         self.text_cache.set_file(reader.clone(), indexer);
         
@@ -191,90 +185,67 @@ impl CliProcessor {
         };
         
         let mut search_engine = SearchEngine::new();
-        search_engine.set_query(pattern.clone(), use_regex, case_sensitive);
+        search_engine.set_query(pattern.clone(), use_regex, false);
         
         let (tx, rx) = mpsc::sync_channel(10_000);
         let cancel_token = Arc::new(AtomicBool::new(false));
-        
-        if count_only {
-            // 只计数
-            search_engine.count_matches(reader, tx, cancel_token);
-            
-            let mut total_count = 0;
-            loop {
-                match rx.recv() {
-                    // 匹配信息
-                    Ok(SearchMessage::CountResult(count)) => {
-                        total_count += count;
-                    }
-                    Ok(SearchMessage::Done(SearchType::Count)) => break,
-                    Ok(SearchMessage::Error(e)) => {
-                        eprintln!("Search error: {}", e);
-                        return Ok(());
-                    }
-                    _ => continue,
-                }
-            }
-            
-            println!("Found {} matches for pattern: {}", total_count, pattern);
-        } else {
-            // 获取匹配结果
-            search_engine.fetch_matches(reader.clone(), tx, 0, max_results, cancel_token);
-            
-            let mut results_shown = 0;
-            // TODO 分开finder 和 filter
-            loop {
-                match rx.recv() {
-                    Ok(SearchMessage::ChunkResult(chunk)) => {
-                        for result in chunk.matches {
-                            if results_shown >= max_results {
-                                break;
-                            }
-                            
-                            // 找到匹配所在的行
-                            if let Some(line_info) = self.text_cache.get_line_info_by_offset(result.byte_offset) {
-                                let line_num = line_info.line_number;
-                                
-                                // 检查行范围过滤器
-                                if let Some((start, end)) = line_filter {
-                                    if line_num < start || line_num > end {
-                                        continue; // 跳过不在指定范围内的结果
-                                    }
-                                }
-                                
-                                // 显示上下文
-                                let start_context = if line_num > context { line_num - context } else { 0 };
-                                let end_context = line_num + 1; // 包含目标行本身
 
-                                
-                                for ctx_line in start_context..end_context {
-                                    if let Some(line_text) = self.text_cache.get_line(ctx_line) {
-                                        let clean_text = line_text.trim_end_matches('\n').trim_end_matches('\r');
-                                        let prefix = if ctx_line == line_num { ">" } else { " " };
-                                        println!("{} {:6}: {}", prefix, ctx_line + 1, clean_text);
-                                    }
-                                }
-                                // }
-                            }
-                            
-                            results_shown += 1;
+        // 获取匹配结果
+        search_engine.fetch_matches(reader.clone(), tx, 0, max_results, cancel_token);
+
+        let mut results_shown = 0;
+        // TODO 分开finder 和 filter
+        loop {
+            match rx.recv() {
+                Ok(SearchMessage::ChunkResult(chunk)) => {
+                    for result in chunk.matches {
+                        if results_shown >= max_results {
+                            break;
                         }
+
+                        // 找到匹配所在的行
+                        if let Some(line_info) = self.text_cache.get_line_info_by_offset(result.byte_offset) {
+                            let line_num = line_info.line_number;
+
+                            // 检查行范围过滤器
+                            if let Some((start, end)) = line_filter {
+                                if line_num < start || line_num > end {
+                                    continue; // 跳过不在指定范围内的结果
+                                }
+                            }
+
+                            // 显示上下文
+                            let start_context = if line_num > context { line_num - context } else { 0 };
+                            let end_context = line_num + 1; // 包含目标行本身
+
+                            for ctx_line in start_context..end_context {
+                                if let Some(line_text) = self.text_cache.get_line(ctx_line) {
+                                    let clean_text = line_text.trim_end_matches('\n').trim_end_matches('\r');
+                                    let prefix = if ctx_line == line_num { ">" } else { " " };
+                                    println!("{} {:6}: {}", prefix, ctx_line + 1, clean_text);
+                                }
+                            }
+                            // }
+                        }
+
+                        results_shown += 1;
                     }
-                    Ok(SearchMessage::Done(SearchType::Fetch)) => break,
-                    Ok(SearchMessage::Error(e)) => {
-                        eprintln!("Search error: {}", e);
-                        return Ok(());
-                    }
-                    _ => continue,
                 }
-            }
-            
-            if results_shown == 0 {
-                println!("No matches found for pattern: {}", pattern);
-            } else {
-                println!("\nShowed {} matches", results_shown);
+                Ok(SearchMessage::Done(SearchType::Fetch)) => break,
+                Ok(SearchMessage::Error(e)) => {
+                    eprintln!("Search error: {}", e);
+                    return Ok(());
+                }
+                _ => continue,
             }
         }
+            
+        if results_shown == 0 {
+            println!("No matches found for pattern: {}", pattern);
+        } else {
+            println!("\nShowed {} matches", results_shown);
+        }
+
         
         Ok(())
     }
@@ -288,5 +259,5 @@ pub fn run_cli() -> Result<()> {
     let mut processor = CliProcessor::new();
     processor.process_command(cli)
 }
-
+//todo 简化命令行，添加缓存
 //todo 使用标准json返回
