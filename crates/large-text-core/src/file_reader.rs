@@ -13,33 +13,31 @@ pub struct FileReader {
 
 impl FileReader {
     pub fn new(path: PathBuf, encoding: &'static Encoding) -> Result<Self> {
-        let file = File::open(&path)?;
+        let file = File::open(&path)?; //?用于简化错误处理，自动将错误类型转换为函数的返回错误类型
         let metadata = file.metadata()?;
         if metadata.len() == 0 {
-            anyhow::bail!("Cannot memory-map an empty file: {:?}", path);
+            anyhow::bail!("Cannot memory-map an empty file: {:?}", path); // anyhow 库提供的宏，用于快速返回错误
         }
-        
+
+        //unsafe 块，因为内存映射操作涉及原始指针和系统调用
         let mmap = unsafe {
-            let mmap = Mmap::map(&file)?;
-            #[cfg(unix)]
+            let mmap = Mmap::map(&file)?; //将整个文件映射到进程的虚拟内存空间
+            #[cfg(unix)] //条件编译属性：这段代码只在 Unix 系统（Linux、macOS 等）上编译
             {
                 libc::madvise(
                     mmap.as_ptr() as *mut libc::c_void,
                     mmap.len(),
-                    libc::MADV_SEQUENTIAL | libc::MADV_WILLNEED,
+                    libc::MADV_SEQUENTIAL | libc::MADV_WILLNEED, //预读优化，提前加载
                 );
             }
             mmap
         };
 
-        Ok(Self {
-            mmap,
-            path,
-            encoding,
-        })
+        Ok(Self {mmap, path, encoding,})
     }
 
     pub fn get_chunk(&self, start: usize, end: usize) -> String {
+        // 用于从内存映射文件中提取指定范围的文本并解码为 Rust 字符串：
         let end = end.min(self.mmap.len());
         if start >= end {
             return String::new();
@@ -80,6 +78,7 @@ impl FileReader {
 
     /// 最快版本：32字节展开 + 并行处理
     pub fn find_line_offsets(&self) -> Vec<usize> {
+        // 映射行号
         let data = self.all_data();
         let len = data.len();
 

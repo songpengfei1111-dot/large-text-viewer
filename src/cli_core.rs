@@ -1,12 +1,11 @@
+#[warn(dead_code)]
+
 use std::path::PathBuf;
-use std::sync::{Arc, atomic::{AtomicBool, Ordering}, mpsc};
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use egui::accesskit::Toggled::False;
 use large_text_core::file_reader::{FileReader, detect_encoding};
-use large_text_core::line_indexer::LineIndexer;
-use large_text_core::text_cache::TextCache;
-use large_text_core::search_engine::{SearchEngine, SearchMessage, SearchType};
+// 移除 mod search_service;，只保留 use
+use crate::search_service::{SearchService, SearchConfig};
 
 #[derive(Parser)]
 #[command(name = "large-text")]
@@ -69,12 +68,36 @@ pub enum Commands {
         /// End line number for filtering results (1-based, optional)
         #[arg(long)]
         end: Option<usize>,
+        /// Only count matches, don't show content
+        #[arg(long)]
+        count_only: bool,
     },
+    FindNext {
+        /// Path to the text file
+        #[arg(short, long)]
+        file: PathBuf,
+        /// Search pattern
+        #[arg(short, long)]
+        pattern: String,
+        /// Current line number (1-based)
+        #[arg(short, long)]
+        line: usize,
+        /// Search direction: 0 for previous (up), 1 for next (down) [default: 1]
+        #[arg(short, long, default_value = "1")]
+        direction: u8,
+        /// Use regex pattern
+        #[arg(long)]
+        regex: bool,
+        /// Show context lines around match
+        #[arg(short, long, default_value = "0")]
+        context: usize,
+    },
+
+
+
 }
 
-pub struct CliProcessor {
-    text_cache: TextCache,
-}
+pub struct CliProcessor;
 
 impl Default for CliProcessor {
     fn default() -> Self {
@@ -84,13 +107,11 @@ impl Default for CliProcessor {
 
 impl CliProcessor {
     pub fn new() -> Self {
-        Self {
-            text_cache: TextCache::new(100000), // 更大的缓存用于CLI操作
-        }
+        Self
     }
 
     /// 处理CLI命令
-    pub fn process_command(&mut self, cli: Cli) -> Result<()> {
+    pub fn process_command(&self, cli: Cli) -> Result<()> {
         match cli.command {
             Commands::Info { file, encoding } => {
                 self.handle_info(file, encoding)
@@ -98,47 +119,43 @@ impl CliProcessor {
             Commands::Lines { file, start, end, count, line_numbers } => {
                 self.handle_lines(file, start, end, count, line_numbers)
             }
-            Commands::Search { file, pattern, regex, max_results, context, start, end } => {
-                self.handle_search(file, pattern, regex, max_results, context, start, end)
+            Commands::Search { file, pattern, regex, max_results, context, start, end, count_only } => {
+                self.handle_search(file, pattern, regex, max_results, context, start, end, count_only)
+            }
+            Commands::FindNext { file, pattern, line, direction, regex, context } => {
+                self.handle_find(file, pattern, line, direction, regex, context)
             }
         }
     }
 
     /// 处理文件信息命令
-    fn handle_info(&mut self, file_path: PathBuf, show_encoding: bool) -> Result<()> {
+    fn handle_info(&self, file_path: PathBuf, show_encoding: bool) -> Result<()> {
         let reader = FileReader::new(file_path.clone(), encoding_rs::UTF_8)?;
-        let mut indexer = LineIndexer::new();
-        indexer.index_file(&reader);
-        
-        self.text_cache.set_file(Arc::new(reader), indexer);
-        
+        let service = SearchService::new(reader);
+
         println!("File: {}", file_path.display());
-        println!("Size: {} bytes", self.text_cache.file_size());
-        println!("Lines: {}", self.text_cache.total_lines());
-        
+        println!("Size: {} bytes", service.reader().len());
+        println!("Lines: {}", service.total_lines());
+
         if show_encoding {
-            // 检测编码
-            let sample_bytes = self.text_cache.get_file_reader()
-                .map(|r| r.get_bytes(0, 1024.min(r.len())))
-                .unwrap_or(&[]);
+            // 修复临时值问题：先获取 reader 的引用
+            let reader_ref = service.reader();
+            let sample_bytes = reader_ref.get_bytes(0, 1024.min(reader_ref.len()));
             let detected_encoding = detect_encoding(sample_bytes);
             println!("Detected encoding: {}", detected_encoding.name());
         }
-        
+
         Ok(())
     }
 
     /// 处理行提取命令
-    fn handle_lines(&mut self, file_path: PathBuf, start: usize, end: Option<usize>, count: Option<usize>, show_line_numbers: bool) -> Result<()> {
+    fn handle_lines(&self, file_path: PathBuf, start: usize, end: Option<usize>, count: Option<usize>, show_line_numbers: bool) -> Result<()> {
         let reader = FileReader::new(file_path, encoding_rs::UTF_8)?;
-        let mut indexer = LineIndexer::new();
-        indexer.index_file(&reader);
-        
-        self.text_cache.set_file(Arc::new(reader), indexer);
-        
-        let total_lines = self.text_cache.total_lines();
+        let service = SearchService::new(reader);
+
+        let total_lines = service.total_lines();
         let start_line = start.saturating_sub(1); // 转换为0-based
-        
+
         let end_line = if let Some(end) = end {
             end.min(total_lines)
         } else if let Some(count) = count {
@@ -146,118 +163,131 @@ impl CliProcessor {
         } else {
             total_lines
         };
-        
+
         if start_line >= total_lines {
             println!("Start line {} exceeds file length ({} lines)", start, total_lines);
             return Ok(());
         }
-        
+
         for line_num in start_line..end_line {
-            if let Some(line_text) = self.text_cache.get_line(line_num) {
-                let clean_text = line_text.trim_end_matches('\n').trim_end_matches('\r');
+            if let Some(line_text) = service.get_line_text(line_num) {
                 if show_line_numbers {
-                    println!("{:6}: {}", line_num + 1, clean_text);
+                    println!("{:6}: {}", line_num + 1, line_text);
                 } else {
-                    println!("{}", clean_text);
+                    println!("{}", line_text);
                 }
             }
         }
-        
+
         Ok(())
     }
 
     /// 处理搜索命令
-    /// 添加行范围限制，在调用mcp时要先校验结果数量，如果多于指定长度就返回err，重搜，给searchline也添加这个选项，强制显示行号
-    fn handle_search(&mut self, file_path: PathBuf, pattern: String, use_regex: bool, max_results: usize, context: usize, start: Option<usize>, end: Option<usize>) -> Result<()> {
-        let reader = Arc::new(FileReader::new(file_path, encoding_rs::UTF_8)?);
-        let mut indexer = LineIndexer::new();
-        indexer.index_file(&reader); //这里最好有缓冲
-        
-        self.text_cache.set_file(reader.clone(), indexer);
-        
-        // 计算行范围过滤器（转换为0-based）
-        let line_filter = if start.is_some() || end.is_some() {
-            let start = start.map(|n| n.saturating_sub(1)).unwrap_or(0);
-            let end = end.map(|n| n.saturating_sub(1)).unwrap_or(usize::MAX);
-            Some((start, end))
-        } else {
-            None
-        };
-        
-        let mut search_engine = SearchEngine::new();
-        search_engine.set_query(pattern.clone(), use_regex, false);
-        
-        let (tx, rx) = mpsc::sync_channel(10_000);
-        let cancel_token = Arc::new(AtomicBool::new(false));
+    fn handle_search(&self, file_path: PathBuf, pattern: String, use_regex: bool, max_results: usize, context: usize, start: Option<usize>, end: Option<usize>, count_only: bool) -> Result<()> {
+        let reader = FileReader::new(file_path, encoding_rs::UTF_8)?;
+        let service = SearchService::new(reader);
 
-        // 获取匹配结果
-        search_engine.fetch_matches(reader.clone(), tx, 0, max_results, cancel_token);
+        let config = SearchConfig::new(pattern.clone())
+            .with_regex(use_regex)
+            .with_max_results(max_results)
+            .with_context(context)
+            .with_line_range(start, end);
 
-        let mut results_shown = 0;
-        // TODO 分开finder 和 filter
-        loop {
-            match rx.recv() {
-                Ok(SearchMessage::ChunkResult(chunk)) => {
-                    for result in chunk.matches {
-                        if results_shown >= max_results {
-                            break;
-                        }
-
-                        // 找到匹配所在的行
-                        if let Some(line_info) = self.text_cache.get_line_info_by_offset(result.byte_offset) {
-                            let line_num = line_info.line_number;
-
-                            // 检查行范围过滤器
-                            if let Some((start, end)) = line_filter {
-                                if line_num < start || line_num > end {
-                                    continue; // 跳过不在指定范围内的结果
-                                }
-                            }
-
-                            // 显示上下文
-                            let start_context = if line_num > context { line_num - context } else { 0 };
-                            let end_context = line_num + 1; // 包含目标行本身
-
-                            for ctx_line in start_context..end_context {
-                                if let Some(line_text) = self.text_cache.get_line(ctx_line) {
-                                    let clean_text = line_text.trim_end_matches('\n').trim_end_matches('\r');
-                                    let prefix = if ctx_line == line_num { ">" } else { " " };
-                                    println!("{} {:6}: {}", prefix, ctx_line + 1, clean_text);
-                                }
-                            }
-                            // }
-                        }
-
-                        results_shown += 1;
-                    }
-                }
-                Ok(SearchMessage::Done(SearchType::Fetch)) => break,
-                Ok(SearchMessage::Error(e)) => {
-                    eprintln!("Search error: {}", e);
-                    return Ok(());
-                }
-                _ => continue,
-            }
+        if count_only {
+            // 只计数模式
+            let count = service.count_matches(config)?;
+            println!("Total matches: {}", count);
+            return Ok(());
         }
-            
-        if results_shown == 0 {
+
+        // 正常搜索模式
+        let summary = service.search(config)?;
+
+        if summary.matches.is_empty() {
             println!("No matches found for pattern: {}", pattern);
-        } else {
-            println!("\nShowed {} matches", results_shown);
+            return Ok(());
         }
 
-        
+        let mut last_line = None;
+
+        for m in &summary.matches {
+            // 如果是新的匹配组，添加分隔线
+            if let Some(last) = last_line {
+                if m.line_number > last + 1 {
+                    println!("...");
+                }
+            }
+
+            //在视觉上区分context行和搜索结果
+            let prefix = if context > 0 && m.line_number == service.get_line_number(m.byte_offset).unwrap_or(0) {
+                ">"
+            } else {
+                " "
+            };
+
+            println!("{}{:6}: {}", prefix, m.line_number + 1, m.line_text);
+            last_line = Some(m.line_number);
+        }
+
+        println!("\nShowed {} matches", summary.total_matches);
+
         Ok(())
     }
 
+
+    // 添加统一的处理方法
+    fn handle_find(&self, file_path: PathBuf, pattern: String, line: usize, direction: u8, use_regex: bool, context: usize) -> Result<()> {
+        let reader = FileReader::new(file_path, encoding_rs::UTF_8)?;
+        let service = SearchService::new(reader);
+
+        // 转换为0-based行号
+        let current_line = line.saturating_sub(1);
+
+        // 根据方向选择查找函数
+        let result = if direction == 0 {
+            service.find_prev(current_line, &pattern, use_regex)
+        } else {
+            service.find_next(current_line, &pattern, use_regex)
+        };
+
+        match result {
+            Some(m) => {
+                let direction_str = if direction == 0 { "Previous" } else { "Next" };
+                println!("{} match found at line {}:", direction_str, m.line_number + 1);
+
+                // 显示上下文
+                if context > 0 {
+                    let start_ctx = if m.line_number > context {
+                        m.line_number - context
+                    } else {
+                        0
+                    };
+                    let end_ctx = (m.line_number + 1 + context).min(service.total_lines());
+
+                    for ctx_line in start_ctx..end_ctx {
+                        if let Some(ctx_text) = service.get_line_text(ctx_line) {
+                            let prefix = if ctx_line == m.line_number { ">" } else { " " };
+                            println!("{}{:6}: {}", prefix, ctx_line + 1, ctx_text);
+                        }
+                    }
+                } else {
+                    println!("{:6}: {}", m.line_number + 1, m.line_text);
+                }
+            }
+            None => {
+                let direction_str = if direction == 0 { "previous" } else { "next" };
+                println!("No {} match found for pattern: {}", direction_str, pattern);
+            }
+        }
+
+        Ok(())
+    }
 
 }
 
 /// CLI入口函数
 pub fn run_cli() -> Result<()> {
     let cli = Cli::parse();
-    let mut processor = CliProcessor::new();
+    let processor = CliProcessor::new();
     processor.process_command(cli)
 }
-//todo 简化命令行，添加缓存
-//todo 使用标准json返回

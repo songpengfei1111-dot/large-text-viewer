@@ -143,14 +143,7 @@ impl SearchEngine {
                             // Add overlap to catch matches crossing batch boundaries
                             let read_end = (batch_end + overlap).min(file_len);
 
-                            let chunk_bytes = reader.get_bytes(pos, read_end);
-                            let chunk_text = match std::str::from_utf8(chunk_bytes) {
-                                Ok(t) => t.to_string(),
-                                Err(_) => {
-                                    let (cow, _, _) = reader.encoding().decode(chunk_bytes);
-                                    cow.into_owned()
-                                }
-                            };
+                            let chunk_text = reader.get_chunk(pos, read_end);
 
                             for mat in regex.find_iter(&chunk_text) {
                                 if cancel_token.load(Ordering::Relaxed) {
@@ -227,16 +220,7 @@ impl SearchEngine {
                     }
 
                     let chunk_end = (chunk_start + CHUNK_SIZE).min(file_len);
-                    let chunk_bytes = reader.get_bytes(chunk_start, chunk_end);
-
-                    let chunk_text = match std::str::from_utf8(chunk_bytes) {
-                        Ok(t) => t.to_string(),
-                        Err(_) => {
-                            let (cow, _, _) = reader.encoding().decode(chunk_bytes);
-                            cow.into_owned()
-                        }
-                    };
-
+                    let chunk_text = reader.get_chunk(chunk_start, chunk_end);
                     let mut local_matches = Vec::new();
 
                     // Define the valid range for starting positions in this chunk

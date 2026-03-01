@@ -21,6 +21,7 @@ impl LineIndexer {
 
     pub fn index_file(&mut self, reader: &FileReader) {
         // 直接一次性获取所有行号偏移
+        // 这个过程可以是异步的
         self.line_offsets = reader.find_line_offsets();
         self.total_lines = self.line_offsets.len();
     }
