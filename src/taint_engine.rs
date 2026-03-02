@@ -134,7 +134,7 @@ impl TaintEngine {
             }
 
         // 处理寄存器传递 (mov/ldr)
-        } else if line_text.contains("mov") || line_text.contains("ldr") {
+        } else if line_text.contains("mov") || line_text.contains("ldr") || line_text.contains("cbz") || line_text.contains("cbnz"){
             if let Some(src_reg) = line_text.split(';')
                 .find(|p| p.starts_with("rr__"))
                 .and_then(|s| s.split('=').next())
@@ -238,7 +238,7 @@ pub fn test_taint() -> anyhow::Result<()> {
     let service = SearchService::new(reader);
 
     let mut engine = TaintEngine::new(service)
-        .with_max_depth(5)
+        .with_max_depth(15)
         .with_verbose(true);
 
     println!("\n=== 追踪内存地址: ld__6cf01586a0_4 ===\n");
