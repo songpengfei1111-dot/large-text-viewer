@@ -7,6 +7,7 @@ pub struct TaintEngine {
     service: SearchService,
     max_depth: usize,
     visited: HashSet<usize>,
+    verbose: bool,  // 控制是否打印过程
 }
 
 #[derive(Debug, Clone)]
@@ -24,6 +25,7 @@ impl TaintEngine {
             service,
             max_depth: 10,
             visited: HashSet::new(),
+            verbose: true,  // 默认打印过程
         }
     }
 
@@ -32,9 +34,17 @@ impl TaintEngine {
         self
     }
 
+    pub fn with_verbose(mut self, verbose: bool) -> Self {
+        self.verbose = verbose;
+        self
+    }
+
     /// 主入口：从指定行开始反向追踪
     pub fn trace_backward(&mut self, start_line: usize, target: &str) -> Result<Option<TracePath>> {
         self.visited.clear();
+        if self.verbose {
+            println!("\n=== 开始反向追踪: {} 从行{} ===\n", target, start_line + 1);
+        }
         Ok(self._trace_backward(start_line, target, 0))
     }
 
@@ -45,6 +55,11 @@ impl TaintEngine {
         self.visited.insert(line_num);
 
         let line_text = self.service.get_line_text(line_num)?;
+        let indent = "  ".repeat(depth);
+
+        if self.verbose {
+            println!("{}🔍 分析行{}: {}", indent, line_num + 1, line_text);
+        }
 
         let mut current = TracePath {
             line_num,
@@ -56,12 +71,12 @@ impl TaintEngine {
 
         // 处理内存读取 (ld)
         if line_text.contains("ld__") {
-            // 提取内存地址（去掉大小后缀）
             if let Some(ld_addr) = line_text.split(';').find(|p| p.contains("ld__")) {
                 let base_addr = ld_addr.rsplit('_').nth(1).unwrap_or(ld_addr);
-                println!("[ldr] 行{} 查找内存写入: {}_*", line_num + 1, base_addr);
+                if self.verbose {
+                    println!("{}📥 内存读取: {} -> 查找写入: {}_*", indent, ld_addr, base_addr);
+                }
 
-                // 使用正则匹配同一基地址的任何写入
                 let st_pattern = format!("st__{}_[0-9]+", base_addr);
                 let config = SearchConfig::new(st_pattern)
                     .with_regex(true)
@@ -69,24 +84,32 @@ impl TaintEngine {
                     .with_line_range(None, Some(line_num));
 
                 if let Some(prev) = self.service.find_prev(line_num, config) {
+                    if self.verbose {
+                        println!("{}✅ 找到内存写入 行{}: {}", indent, prev.line_number + 1,
+                                 self.service.get_line_text(prev.line_number).unwrap_or_default());
+                    }
                     current.trace_type = "MEM→REG";
                     if let Some(source) = self._trace_backward(prev.line_number, base_addr, depth + 1) {
                         current.sources = vec![source];
                     }
                 } else {
+                    if self.verbose {
+                        println!("{}❌ 未找到内存写入", indent);
+                    }
                     current.trace_type = "MEM→REG(END)";
                 }
             }
 
         // 处理内存写入 (st)
         } else if line_text.contains("st__") {
-            // 查找寄存器来源
             if let Some(reg) = line_text.split(';')
                 .find(|p| p.starts_with("rr__"))
                 .and_then(|s| s.split('=').next())
                 .and_then(|s| s.strip_prefix("rr__"))
             {
-                println!("[str] 行{} 查找寄存器写入: r[wr]__{}=", line_num + 1, reg);
+                if self.verbose {
+                    println!("{}📤 内存写入: 查找寄存器来源: {}", indent, reg);
+                }
 
                 let config = SearchConfig::new(format!("r[wr]__{}=", reg))
                     .with_regex(true)
@@ -94,23 +117,32 @@ impl TaintEngine {
                     .with_line_range(None, Some(line_num));
 
                 if let Some(prev) = self.service.find_prev(line_num, config) {
+                    if self.verbose {
+                        println!("{}✅ 找到寄存器写入 行{}: {}", indent, prev.line_number + 1,
+                                 self.service.get_line_text(prev.line_number).unwrap_or_default());
+                    }
                     current.trace_type = "REG→MEM";
                     if let Some(source) = self._trace_backward(prev.line_number, reg, depth + 1) {
                         current.sources = vec![source];
                     }
                 } else {
+                    if self.verbose {
+                        println!("{}❌ 未找到寄存器来源", indent);
+                    }
                     current.trace_type = "REG→MEM(END)";
                 }
             }
 
-        // 处理寄存器传递 (mov)
+        // 处理寄存器传递 (mov/ldr)
         } else if line_text.contains("mov") || line_text.contains("ldr") {
             if let Some(src_reg) = line_text.split(';')
                 .find(|p| p.starts_with("rr__"))
                 .and_then(|s| s.split('=').next())
                 .and_then(|s| s.strip_prefix("rr__"))
             {
-                println!("[mov/ldr] 行{} 查找源寄存器: {}", line_num + 1, src_reg);
+                if self.verbose {
+                    println!("{}🔄 寄存器传递: 查找源寄存器: {}", indent, src_reg);
+                }
 
                 let config = SearchConfig::new(format!("r[wr]__{}=", src_reg))
                     .with_regex(true)
@@ -118,18 +150,27 @@ impl TaintEngine {
                     .with_line_range(None, Some(line_num));
 
                 if let Some(prev) = self.service.find_prev(line_num, config) {
+                    if self.verbose {
+                        println!("{}✅ 找到源寄存器 行{}: {}", indent, prev.line_number + 1,
+                                 self.service.get_line_text(prev.line_number).unwrap_or_default());
+                    }
                     current.trace_type = "REG→REG";
                     if let Some(source) = self._trace_backward(prev.line_number, src_reg, depth + 1) {
                         current.sources = vec![source];
                     }
                 } else {
+                    if self.verbose {
+                        println!("{}❌ 未找到源寄存器", indent);
+                    }
                     current.trace_type = "REG→REG(END)";
                 }
             }
 
         // 处理算术运算
         } else if line_text.contains("add") || line_text.contains("sub") {
-            println!("[arith] 行{} 算术运算", line_num + 1);
+            if self.verbose {
+                println!("{}➕ 算术运算", indent);
+            }
 
             let src_regs: Vec<String> = line_text.split(';')
                 .filter(|p| p.starts_with("rr__"))
@@ -137,6 +178,10 @@ impl TaintEngine {
                 .filter_map(|s| s.strip_prefix("rr__"))
                 .map(|s| s.to_string())
                 .collect();
+
+            if self.verbose {
+                println!("{}   源寄存器: {:?}", indent, src_regs);
+            }
 
             current.trace_type = "ARITH";
             for reg in src_regs {
@@ -146,6 +191,9 @@ impl TaintEngine {
                     .with_line_range(None, Some(line_num));
 
                 if let Some(prev) = self.service.find_prev(line_num, config) {
+                    if self.verbose {
+                        println!("{}   ↳ 追踪分支: {}", indent, reg);
+                    }
                     if let Some(source) = self._trace_backward(prev.line_number, &reg, depth + 1) {
                         current.sources.push(source);
                     }
@@ -153,6 +201,9 @@ impl TaintEngine {
             }
 
         } else {
+            if self.verbose {
+                println!("{}🔚 终点/常量", indent);
+            }
             current.trace_type = "CONST/END";
         }
 
@@ -186,10 +237,13 @@ pub fn test_taint() -> anyhow::Result<()> {
     let reader = FileReader::new(file_path, encoding_rs::UTF_8)?;
     let service = SearchService::new(reader);
 
-    let mut engine = TaintEngine::new(service).with_max_depth(5);
+    let mut engine = TaintEngine::new(service)
+        .with_max_depth(5)
+        .with_verbose(true);
 
     println!("\n=== 追踪内存地址: ld__6cf01586a0_4 ===\n");
     if let Some(trace) = engine.trace_backward(9028, "ld__6cf01586a0_4")? {
+        println!("\n=== 追踪结果 ===\n");
         trace.print();
     }
 
