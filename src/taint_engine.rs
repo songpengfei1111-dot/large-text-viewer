@@ -55,7 +55,8 @@ impl TaintEngine {
         self.visited.insert(line_num);
 
         let line_text = self.service.get_line_text(line_num)?;
-        let indent = "  ".repeat(depth);
+        // let indent = "  ".repeat(depth);
+        let indent = "";
 
         if self.verbose {
             println!("{}🔍 分析行{}: {}", indent, line_num + 1, line_text);
@@ -74,7 +75,7 @@ impl TaintEngine {
             if let Some(ld_addr) = line_text.split(';').find(|p| p.contains("ld__")) {
                 let base_addr = ld_addr.rsplit('_').nth(1).unwrap_or(ld_addr);
                 if self.verbose {
-                    println!("{}📥 内存读取: {} -> 查找写入: {}_*", indent, ld_addr, base_addr);
+                    println!("{} -> st__{}_*", ld_addr, base_addr);
                 }
 
                 let st_pattern = format!("st__{}_[0-9]+", base_addr);
@@ -109,8 +110,8 @@ impl TaintEngine {
                     println!("{}📤 内存写入: 查找寄存器来源: {}", indent, reg);
                 }
 
-                let config = SearchConfig::new(format!("r[wr]__{}=", reg))
-                    .with_regex(true);
+                let config = SearchConfig::new(format!("r[wr]__{}=", reg)).with_regex(true);
+
 
                 if let Some(prev) = self.service.find_prev(line_num, config) {
                     if self.verbose {
