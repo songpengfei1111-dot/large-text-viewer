@@ -79,9 +79,7 @@ impl TaintEngine {
 
                 let st_pattern = format!("st__{}_[0-9]+", base_addr);
                 let config = SearchConfig::new(st_pattern)
-                    .with_regex(true)
-                    .with_max_results(1)
-                    .with_line_range(None, Some(line_num));
+                    .with_regex(true);
 
                 if let Some(prev) = self.service.find_prev(line_num, config) {
                     if self.verbose {
@@ -112,9 +110,7 @@ impl TaintEngine {
                 }
 
                 let config = SearchConfig::new(format!("r[wr]__{}=", reg))
-                    .with_regex(true)
-                    .with_max_results(1)
-                    .with_line_range(None, Some(line_num));
+                    .with_regex(true);
 
                 if let Some(prev) = self.service.find_prev(line_num, config) {
                     if self.verbose {
@@ -243,8 +239,8 @@ pub fn test_taint() -> anyhow::Result<()> {
 
     println!("\n=== 追踪内存地址: ld__6cf01586a0_4 ===\n");
     if let Some(trace) = engine.trace_backward(9028, "ld__6cf01586a0_4")? {
-        println!("\n=== 追踪结果 ===\n");
-        trace.print();
+        // println!("\n=== 追踪结果 ===\n");
+        // trace.print();
     }
 
     Ok(())
