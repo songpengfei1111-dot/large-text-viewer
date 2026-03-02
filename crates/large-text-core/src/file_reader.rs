@@ -35,7 +35,8 @@ impl FileReader {
 
         Ok(Self {mmap, path, encoding,})
     }
-
+    
+    //TODO get line text等底层函数都可以封装进来
     pub fn get_chunk(&self, start: usize, end: usize) -> String {
         // 用于从内存映射文件中提取指定范围的文本并解码为 Rust 字符串：
         let end = end.min(self.mmap.len());

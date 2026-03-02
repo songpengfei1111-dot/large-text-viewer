@@ -236,6 +236,7 @@ impl CliProcessor {
 
 
     // 添加统一的处理方法
+    /// 处理 find 命令
     fn handle_find(&self, file_path: PathBuf, pattern: String, line: usize, direction: u8, use_regex: bool, context: usize) -> Result<()> {
         let reader = FileReader::new(file_path, encoding_rs::UTF_8)?;
         let service = SearchService::new(reader);
@@ -243,11 +244,17 @@ impl CliProcessor {
         // 转换为0-based行号
         let current_line = line.saturating_sub(1);
 
-        // 根据方向选择查找函数
+        // 创建统一的配置
+        let config = SearchConfig::new(pattern.clone())
+            .with_regex(use_regex)
+            .with_context(context)  // 上下文行数也会被使用
+            .with_case_sensitive(false);  // 默认不区分大小写
+
+        // 根据方向使用对应的查找方法
         let result = if direction == 0 {
-            service.find_prev(current_line, &pattern, use_regex)
+            service.find_prev(current_line, config)
         } else {
-            service.find_next(current_line, &pattern, use_regex)
+            service.find_next(current_line, config)
         };
 
         match result {
@@ -255,7 +262,7 @@ impl CliProcessor {
                 let direction_str = if direction == 0 { "Previous" } else { "Next" };
                 println!("{} match found at line {}:", direction_str, m.line_number + 1);
 
-                // 显示上下文
+                // 显示上下文（从config中获取）
                 if context > 0 {
                     let start_ctx = if m.line_number > context {
                         m.line_number - context
@@ -282,7 +289,6 @@ impl CliProcessor {
 
         Ok(())
     }
-
 }
 
 /// CLI入口函数
