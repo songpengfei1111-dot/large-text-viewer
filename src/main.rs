@@ -1,6 +1,6 @@
 
 mod cli_core;
-mod taint;
+mod taint_engine;
 mod search_service;  // 添加这一行
 
 // use std::env;
@@ -17,8 +17,10 @@ mod search_service;  // 添加这一行
 // }
 
 fn main() {
-    let _ = test_search_count();
+    let _ = taint_engine::test_taint();
 }
+
+
 
 
 pub fn test_search_count() -> anyhow::Result<()> {
@@ -50,13 +52,28 @@ pub fn test_search_count() -> anyhow::Result<()> {
     println!("{}:{}", line_num,line_text);
 
     //
-
     let config = SearchConfig::new("st__6cf01586a0_".to_string())
         .with_regex(true)
         .with_context(0)  // 显示前后2行上下文
         .with_case_sensitive(true);
     let result = service.find_prev(line_num-1,config).unwrap();
 
+    println!("{}:{}", result.line_number,result.line_text);
+    // 然后按指令case解析，再下发搜索命令
+
+    let config = SearchConfig::new("q0=0x0x0100000001000000e061f2cb6c000000".to_string())
+        .with_regex(true)
+        .with_context(0)  // 显示前后2行上下文
+        .with_case_sensitive(true);;
+    let result = service.find_prev(result.line_number-1,config).unwrap();
+    println!("{}:{}", result.line_number,result.line_text);
+
+
+    let config = SearchConfig::new("st__6f5c29c520".to_string())
+        .with_regex(true)
+        .with_context(0)  // 显示前后2行上下文
+        .with_case_sensitive(true);;
+    let result = service.find_prev(result.line_number-1,config).unwrap();
     println!("{}:{}", result.line_number,result.line_text);
 
     Ok(())
