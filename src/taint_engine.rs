@@ -1,5 +1,5 @@
 // taint_engine.rs
-use crate::search_service::{SearchService, SearchConfig, SearchMatch};
+use crate::search_service::{SearchService, SearchConfig};
 use anyhow::Result;
 use std::collections::HashSet;
 
@@ -19,39 +19,27 @@ pub struct TracePath {
     pub sources: Vec<TracePath>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub enum TraceType {
-    MemToReg,
-    RegToMem,
-    RegToReg,
-    Arith,
-    Constant,
+    MemToReg(String),      // 内存到寄存器，携带内存地址
+    RegToMem(String),      // 寄存器到内存，携带寄存器名
+    RegToReg(String),      // 寄存器传递，携带源寄存器名
+    Arith(Vec<String>),    // 算术运算，携带源寄存器列表
+    Constant,              // 常量/终点
     Unknown,
-    End,
 }
 
-impl std::fmt::Display for TraceType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl TraceType {
+    fn as_str(&self) -> &'static str {
         match self {
-            TraceType::MemToReg => write!(f, "MEM→REG"),
-            TraceType::RegToMem => write!(f, "REG→MEM"),
-            TraceType::RegToReg => write!(f, "REG→REG"),
-            TraceType::Arith => write!(f, "ARITH"),
-            TraceType::Constant => write!(f, "CONST"),
-            TraceType::Unknown => write!(f, "UNKNOWN"),
-            TraceType::End => write!(f, "END"),
+            TraceType::MemToReg(_) => "MEM→REG",
+            TraceType::RegToMem(_) => "REG→MEM",
+            TraceType::RegToReg(_) => "REG→REG",
+            TraceType::Arith(_) => "ARITH",
+            TraceType::Constant => "CONST",
+            TraceType::Unknown => "UNKNOWN",
         }
     }
-}
-
-// 指令类型枚举
-#[derive(Debug)]
-enum InstructionType {
-    MemoryRead { addr: String },
-    MemoryWrite { reg: String, value: String },
-    RegTransfer { reg: String, value: String },
-    Arithmetic { regs: Vec<String> },
-    Other,
 }
 
 impl TaintEngine {
@@ -74,10 +62,11 @@ impl TaintEngine {
         self
     }
 
-    /// 主入口：从指定行开始反向追踪
     pub fn trace_backward(&mut self, start_line: usize, target: &str) -> Result<Option<TracePath>> {
         self.visited.clear();
-        self.log(&format!("\n=== 开始反向追踪: {} 从行{} ===\n", target, start_line + 1));
+        if self.verbose {
+            println!("\n=== 开始反向追踪: {} 从行{} ===\n", target, start_line + 1);
+        }
         Ok(self.trace_backward_internal(start_line, target, 0))
     }
 
@@ -89,7 +78,7 @@ impl TaintEngine {
 
         let line_text = self.service.get_line_text(line_num)?;
 
-        let mut current = TracePath {
+        let mut path = TracePath {
             line_num,
             instruction: line_text.clone(),
             trace_type: TraceType::Unknown,
@@ -97,212 +86,211 @@ impl TaintEngine {
             sources: vec![],
         };
 
-        match self.parse_instruction_type(&line_text) {
-            InstructionType::MemoryRead { addr } => {
-                self.handle_memory_read(&mut current, line_num, &addr, depth)?;
-            }
-            InstructionType::MemoryWrite { reg, value } => {
-                self.handle_memory_write(&mut current, line_num, &reg, &value, depth)?;
-            }
-            InstructionType::RegTransfer { reg, value } => {
-                self.handle_reg_transfer(&mut current, line_num, &value, depth)?;
-            }
-            InstructionType::Arithmetic { regs } => {
-                self.handle_arithmetic(&mut current, line_num, regs, depth)?;
-            }
-            InstructionType::Other => {
-                current.trace_type = TraceType::Constant;
-                self.log("终点/常量");
+        // 处理内存读取 (ld)
+        if line_text.contains("ld__") {
+            path.trace_type = TraceType::MemToReg(target.to_string());
+            if let Some(ld_addr) = self.extract_ld_addr(&line_text) {
+                if self.verbose {
+                    println!("[mem2mem] {} -> st__{}_*", ld_addr, ld_addr);
+                }
+                path.sources = self.trace_mem_read(line_num, &ld_addr, depth)
+                    .into_iter().collect();
             }
         }
+        // 处理内存写入 (st)
+        else if line_text.contains("st__") {
+            if let Some((reg, value)) = self.extract_st_reg_value(&line_text) {
 
-        Some(current)
-    }
-
-    // 解析指令类型
-    fn parse_instruction_type(&self, line: &str) -> InstructionType {
-        if line.contains("ld__") {
-            if let Some(addr) = line.split(';')
-                .find(|p| p.contains("ld__"))
-                .and_then(|p| p.split('_').nth(1)) {
-                return InstructionType::MemoryRead { addr: addr.to_string() };
+                path.trace_type = TraceType::RegToMem(reg.clone());
+                path.sources = self.trace_mem_write(line_num, &reg, &value, depth)
+                    .into_iter().collect();
             }
-        } else if line.contains("st__") {
-            if let (Some(reg), Some(value)) = (
-                self.extract_register(line),
-                self.extract_value(line)
-            ) {
-                return InstructionType::MemoryWrite { reg, value };
+        }
+        // 处理寄存器传递 (mov/ldr/cbz/cbnz)
+        else if self.is_reg_transfer_insn(&line_text) {
+            if let Some((src_reg, value)) = self.extract_reg_value(&line_text) {
+                if self.verbose {
+                    println!("[reg2reg]: {}", src_reg);
+                }
+                path.trace_type = TraceType::RegToReg(src_reg.clone());
+                path.sources = self.trace_reg_transfer(line_num, &src_reg, &value, depth)
+                    .into_iter().collect();
             }
-        } else if line.contains("mov") || line.contains("ldr") ||
-            line.contains("cbz") || line.contains("cbnz") {
-            if let (Some(reg), Some(value)) = (
-                self.extract_register(line),
-                self.extract_value(line)
-            ) {
-                return InstructionType::RegTransfer { reg, value };
+        }
+        // 处理算术运算
+        else if self.is_arith_insn(&line_text) {
+            if self.verbose {
+                println!("[AlgOp]");
             }
-        } else if line.contains("add") || line.contains("sub") {
-            let regs = line.split(';')
-                .filter(|p| p.starts_with("rr__"))
-                .filter_map(|s| s.split('=').next())
-                .filter_map(|s| s.strip_prefix("rr__"))
-                .map(String::from)
-                .collect();
-            return InstructionType::Arithmetic { regs };
+            let src_regs = self.extract_src_regs(&line_text);
+            if self.verbose {
+                println!("   srcReg: {:?}", src_regs);
+            }
+            path.trace_type = TraceType::Arith(src_regs.clone());
+            path.sources = self.trace_arith_operation(line_num, src_regs, depth);
+        }
+        // 终点/常量
+        else {
+            if self.verbose {
+                println!("终点/常量");
+            }
+            path.trace_type = TraceType::Constant;
         }
 
-        InstructionType::Other
+        Some(path)
     }
 
-    // 处理内存读取 (ld)
-    fn handle_memory_read(&mut self, current: &mut TracePath, line_num: usize, addr: &str, depth: usize) -> Option<()> {
-        self.log(&format!("[内存读取] 地址: {}", addr));
+    // 辅助方法：提取ld指令的内存地址
+    fn extract_ld_addr(&self, line_text: &str) -> Option<String> {
+        line_text.split(';')
+            .find(|p| p.contains("ld__"))
+            .map(|addr| {
+                addr.rsplit('_').nth(1)
+                    .unwrap_or(addr)
+                    .to_string()
+            })
+    }
 
+    // 辅助方法：提取st指令的寄存器和值
+    fn extract_st_reg_value(&self, line_text: &str) -> Option<(String, String)> {
+        let reg = line_text.split(';')
+            .find(|p| p.starts_with("rr__"))
+            .and_then(|s| s.split('=').next())
+            .and_then(|s| s.strip_prefix("rr__"))?;
+
+        let value = line_text.split(';')
+            .find(|p| p.starts_with(&format!("rr__{}=", reg)))
+            .and_then(|s| s.split('=').nth(1))?;
+
+        Some((reg.to_string(), value.trim().to_string()))
+    }
+
+    // 辅助方法：提取寄存器和值
+    fn extract_reg_value(&self, line_text: &str) -> Option<(String, String)> {
+        let reg = line_text.split(';')
+            .find(|p| p.starts_with("rr__"))
+            .and_then(|s| s.split('=').next())
+            .and_then(|s| s.strip_prefix("rr__"))?;
+
+        let value = line_text.split(';')
+            .find(|p| p.starts_with(&format!("rr__{}=", reg)))
+            .and_then(|s| s.split('=').nth(1))?;
+
+        Some((reg.to_string(), value.trim().to_string()))
+    }
+
+    // 辅助方法：提取所有源寄存器
+    fn extract_src_regs(&self, line_text: &str) -> Vec<String> {
+        line_text.split(';')
+            .filter(|p| p.starts_with("rr__"))
+            .filter_map(|s| s.split('=').next())
+            .filter_map(|s| s.strip_prefix("rr__"))
+            .map(String::from)
+            .collect()
+    }
+
+    // 辅助方法：判断是否是寄存器传递指令
+    fn is_reg_transfer_insn(&self, line_text: &str) -> bool {
+        line_text.contains("mov") ||
+            line_text.contains("ldr") ||
+            line_text.contains("cbz") ||
+            line_text.contains("cbnz")
+    }
+
+    // 辅助方法：判断是否是算术指令
+    fn is_arith_insn(&self, line_text: &str) -> bool {
+        line_text.contains("add") || line_text.contains("sub")
+    }
+
+    // 追踪内存读取
+    fn trace_mem_read(&mut self, line_num: usize, addr: &str, depth: usize) -> Option<TracePath> {
         let pattern = format!("st__{}_[0-9]+", addr);
-        if let Some(prev) = self.find_previous_instruction(line_num, &pattern, true) {
-            self.log_line(prev.line_number);
-            current.trace_type = TraceType::MemToReg;
-            if let Some(source) = self.trace_backward_internal(prev.line_number, addr, depth + 1) {
-                current.sources = vec![source];
-            }
-        } else {
-            self.log("❌ 未找到内存写入");
-            current.trace_type = TraceType::End;
-        }
-        Some(())
+        let config = SearchConfig::new(pattern)
+            .with_regex(true);
+
+        self.find_and_trace(line_num, &config, addr, depth)
     }
 
-    // 处理内存写入 (st)
-    fn handle_memory_write(&mut self, current: &mut TracePath, line_num: usize, reg: &str, value: &str, depth: usize) -> Option<()> {
-        self.log(&format!("[内存写入] 寄存器: {}, 值: {}", reg, value));
+    // 追踪内存写入
+    fn trace_mem_write(&mut self, line_num: usize, reg: &str, value: &str, depth: usize) -> Option<TracePath> {
+        let pattern = format!("rw_.*{}={}", &reg[1..],value);
+        println!("[regW] {}", pattern);
 
-        // 搜索这个具体的值
-        if let Some(prev) = self.find_previous_instruction(line_num, value, false) {
-            self.log_line(prev.line_number);
-            current.trace_type = TraceType::RegToMem;
-            if let Some(source) = self.trace_backward_internal(prev.line_number, value, depth + 1) {
-                current.sources = vec![source];
-            }
-        } else {
-            self.log("❌ 未找到值的来源");
-            current.trace_type = TraceType::End;
-        }
-        Some(())
+        let config = SearchConfig::new(pattern)
+            .with_regex(true);
+
+        self.find_and_trace(line_num, &config, reg, depth)
     }
 
-    // 处理寄存器传递
-    fn handle_reg_transfer(&mut self, current: &mut TracePath, line_num: usize, value: &str, depth: usize) -> Option<()> {
-        self.log(&format!("[寄存器传递] 值: {}", value));
+    // 追踪寄存器传递
+    fn trace_reg_transfer(&mut self, line_num: usize, reg: &str, _value: &str, depth: usize) -> Option<TracePath> {
+        let pattern = format!("r[wr]__{}=", reg);
+        let config = SearchConfig::new(pattern)
+            .with_regex(true)
+            .with_max_results(1)
+            .with_line_range(None, Some(line_num));
 
-        // 搜索这个具体的值
-        if let Some(prev) = self.find_previous_instruction(line_num, value, false) {
-            self.log_line(prev.line_number);
-            current.trace_type = TraceType::RegToReg;
-            if let Some(source) = self.trace_backward_internal(prev.line_number, value, depth + 1) {
-                current.sources = vec![source];
-            }
-        } else {
-            self.log("❌ 未找到值的来源");
-            current.trace_type = TraceType::End;
-        }
-        Some(())
+        self.find_and_trace(line_num, &config, reg, depth)
     }
 
-    // 处理算术运算
-    fn handle_arithmetic(&mut self, current: &mut TracePath, line_num: usize, regs: Vec<String>, depth: usize) -> Option<()> {
-        self.log(&format!("[算术运算] 源寄存器: {:?}", regs));
-
-        current.trace_type = TraceType::Arith;
+    // 追踪算术运算
+    fn trace_arith_operation(&mut self, line_num: usize, regs: Vec<String>, depth: usize) -> Vec<TracePath> {
+        let mut sources = Vec::new();
         for reg in regs {
-            // 对于算术运算，需要找到每个寄存器的值
-            if let Some(value) = self.extract_register_value(line_num, &reg) {
-                self.log(&format!("  ↳ 寄存器 {} 的值: {}", reg, value));
+            let config = SearchConfig::new(format!("r[wr]__{}=", reg))
+                .with_regex(true)
+                .with_max_results(1)
+                .with_line_range(None, Some(line_num));
 
-                if let Some(prev) = self.find_previous_instruction(line_num, &value, false) {
-                    self.log(&format!("  ↳ 追踪分支: {}", reg));
-                    if let Some(source) = self.trace_backward_internal(prev.line_number, &value, depth + 1) {
-                        current.sources.push(source);
-                    }
+            if let Some(prev) = self.service.find_prev(line_num, config) {
+                if self.verbose {
+                    println!("  ↳ 追踪分支: {}", reg);
+                }
+                if let Some(source) = self.trace_backward_internal(prev.line_number, &reg, depth + 1) {
+                    sources.push(source);
                 }
             }
         }
-        Some(())
+        sources
     }
 
-    // 辅助方法：提取寄存器名
-    fn extract_register(&self, line: &str) -> Option<String> {
-        line.split(';')
-            .find(|p| p.starts_with("rr__"))
-            .and_then(|s| s.split('=').next())
-            .and_then(|s| s.strip_prefix("rr__"))
-            .map(String::from)
-    }
-
-    // 辅助方法：提取值
-    fn extract_value(&self, line: &str) -> Option<String> {
-        line.split(';')
-            .find(|p| p.starts_with("rr__"))
-            .and_then(|s| s.split('=').nth(1))
-            .map(|v| v.trim().to_string())
-    }
-
-    // 辅助方法：从指定行提取寄存器的值
-    fn extract_register_value(&self, line_num: usize, reg: &str) -> Option<String> {
-        let line = self.service.get_line_text(line_num)?;
-        let pattern = format!("rr__{}=", reg);
-
-        line.split(';')
-            .find(|p| p.starts_with(&pattern))
-            .and_then(|s| s.split('=').nth(1))
-            .map(|v| v.trim().to_string())
-    }
-
-    // 查找前一条指令
-    fn find_previous_instruction(&self, current_line: usize, pattern: &str, use_regex: bool) -> Option<SearchMatch> {
-        let config = SearchConfig::new(pattern.to_string())
-            .with_regex(use_regex)
-            .with_max_results(1)
-            .with_line_range(None, Some(current_line));
-
-        self.service.find_prev(current_line, config)
-    }
-
-    // 日志辅助方法
-    fn log(&self, message: &str) {
-        if self.verbose {
-            println!("{}", message);
-        }
-    }
-
-    fn log_line(&self, line_num: usize) {
-        if self.verbose {
-            if let Some(text) = self.service.get_line_text(line_num) {
-                println!("行{}: {}", line_num + 1, text);
-            }
-        }
+    // 通用查找并追踪
+    fn find_and_trace(&mut self, line_num: usize, config: &SearchConfig, target: &str, depth: usize) -> Option<TracePath> {
+        self.service.find_prev(line_num, config.clone())
+            .and_then(|prev| {
+                if self.verbose {
+                    println!("{}: {}", prev.line_number + 1,
+                             self.service.get_line_text(prev.line_number).unwrap_or_default());
+                }
+                self.trace_backward_internal(prev.line_number, target, depth + 1)
+            })
+            .or_else(|| {
+                if self.verbose {
+                    println!("❌ 未找到来源");
+                }
+                None
+            })
     }
 }
 
 impl TracePath {
     pub fn print(&self) {
-        self.print_internal(0);
+        self.print_with_indent(0);
     }
 
-    fn print_internal(&self, indent: usize) {
+    fn print_with_indent(&self, indent: usize) {
         let indent_str = "  ".repeat(indent);
         println!("{}{} [行{}] {}",
                  indent_str,
-                 self.trace_type,
+                 self.trace_type.as_str(),
                  self.line_num + 1,
                  self.instruction
         );
         for src in &self.sources {
-            src.print_internal(indent + 1);
+            src.print_with_indent(indent + 1);
         }
     }
 }
-
 
 pub fn test_taint() -> anyhow::Result<()> {
     use large_text_core::file_reader::FileReader;
@@ -317,7 +305,6 @@ pub fn test_taint() -> anyhow::Result<()> {
 
     println!("\n=== 追踪内存地址: ld__6cf01586a0_4 ===\n");
     if let Some(trace) = engine.trace_backward(9028, "ld__6cf01586a0_4")? {
-        // 如果需要打印结果
         // trace.print();
     }
 

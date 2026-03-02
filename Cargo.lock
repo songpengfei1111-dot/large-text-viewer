@@ -1930,6 +1930,7 @@ dependencies = [
  "encoding_rs",
  "large-text-core",
  "notify",
+ "regex",
  "rfd",
 ]
 
