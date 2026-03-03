@@ -7,7 +7,6 @@ pub struct TaintEngine {
     service: SearchService,
     max_depth: usize,
     visited: HashSet<usize>,
-    verbose: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -29,26 +28,12 @@ pub enum TraceType {
     Unknown,
 }
 
-impl TraceType {
-    fn as_str(&self) -> &'static str {
-        match self {
-            TraceType::MemToReg(_) => "MEM→REG",
-            TraceType::RegToMem(_) => "REG→MEM",
-            TraceType::RegToReg(_) => "REG→REG",
-            TraceType::Arith(_) => "ARITH",
-            TraceType::Constant => "CONST",
-            TraceType::Unknown => "UNKNOWN",
-        }
-    }
-}
-
 impl TaintEngine {
     pub fn new(service: SearchService) -> Self {
         Self {
             service,
             max_depth: 10,
             visited: HashSet::new(),
-            verbose: true,
         }
     }
 
@@ -59,9 +44,8 @@ impl TaintEngine {
 
     pub fn trace_backward(&mut self, start_line: usize, target: &str) -> Result<Option<TracePath>> {
         self.visited.clear();
-        if self.verbose {
-            println!("\n=== 开始反向追踪: {} 从行{} ===\n", target, start_line + 1);
-        }
+        println!("\n=== 开始反向追踪: {} 从行{} ===\n", target, start_line + 1);
+
         Ok(self._trace_backward(start_line, target, 0))
     }
 
@@ -117,9 +101,7 @@ impl TaintEngine {
         }
         // 终点/常量
         else {
-            if self.verbose {
-                println!("终点/常量");
-            }
+            println!("终点/常量");
             path.trace_type = TraceType::Constant;
         }
 
@@ -214,15 +196,15 @@ impl TaintEngine {
         let mut sources = Vec::new();
         // 先判断是否相同，再逐个跟踪
         for reg in regs {
-            let config = SearchConfig::new(format!("r[wr]__{}=", reg))
+            let pattern = format!("rw__{}=", reg);
+            println!("[arith] {}", pattern);
+            let config = SearchConfig::new(pattern)
                 .with_regex(true)
                 .with_max_results(1)
                 .with_line_range(None, Some(line_num));
 
             if let Some(prev) = self.service.find_prev(line_num, config) {
-                if self.verbose {
-                    println!("  ↳ 追踪分支: {}", reg);
-                }
+                println!("\t\t↳追踪分支: {}", reg);
                 if let Some(source) = self._trace_backward(prev.line_number, &reg, depth + 1) {
                     sources.push(source);
                 }
