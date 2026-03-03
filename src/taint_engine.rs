@@ -16,6 +16,7 @@ pub struct TracePath {
     pub trace_type: TraceType,
     pub depth: usize,
     pub sources: Vec<TracePath>,
+    // pub search_pattern: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -56,13 +57,14 @@ impl TaintEngine {
 
         let line_text = self.service.get_line_text(line_num)?;
 
-        // 使用链表，这样后面还可以树拓展
+
         let mut path = TracePath {
             line_num,
             instruction: line_text.clone(),
             trace_type: TraceType::Unknown,
             depth,
             sources: vec![],
+
         };
 
         // 处理内存读取 (ld)
@@ -93,9 +95,7 @@ impl TaintEngine {
         // 处理算术运算
         else if self.is_arith_insn(&line_text) {
             println!("[AlgOp]");
-            let src_regs = self.extract_src_regs(&line_text);
-            println!("\tsrcReg: {:?}", src_regs);
-
+            let src_regs = self.extract_reg_pairs(&line_text);
             path.trace_type = TraceType::Arith(src_regs.clone());
             path.sources = self.trace_arith_operation(line_num, src_regs, depth);
         }
@@ -121,16 +121,27 @@ impl TaintEngine {
 
     // 辅助方法：提取寄存器和值
     fn extract_reg_value(&self, line_text: &str) -> Option<(String, String)> {
-        let reg = line_text.split(';')
+        // TODO 对于多个寄存器的处理
+        line_text.split(';')
             .find(|p| p.starts_with("rr__"))
-            .and_then(|s| s.split('=').next())
-            .and_then(|s| s.strip_prefix("rr__"))?;
+            .and_then(|part| part.strip_prefix("rr__"))
+            .and_then(|s| s.split('_').next())
+            .and_then(|first_pair| first_pair.split_once('='))
+            .map(|(reg, val)| (reg.to_string(), val.to_string()))
+    }
 
-        let value = line_text.split(';')
-            .find(|p| p.starts_with(&format!("rr__{}=", reg)))
-            .and_then(|s| s.split('=').nth(1))?;
-
-        Some((reg.to_string(), value.trim().to_string()))
+    fn extract_reg_values(line_text: &str) -> Vec<(String, String)> {
+        line_text.split(';')
+            .find(|p| p.starts_with("rr__"))
+            .and_then(|part| part.strip_prefix("rr__"))
+            .map(|s| {
+                s.split('_')
+                    .filter(|pair| pair.contains('='))
+                    .filter_map(|pair| pair.split_once('='))
+                    .map(|(reg, val)| (reg.to_string(), val.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     // 辅助方法：提取所有源寄存器
@@ -142,6 +153,21 @@ impl TaintEngine {
             .map(String::from)
             .collect()
     }
+
+    //["w22=0x1", "w22=0x1"]
+    fn extract_reg_pairs(&self, line_text: &str) -> Vec<String> {
+        line_text.split(';')
+            .find(|p| p.starts_with("rr__"))
+            .and_then(|part| part.strip_prefix("rr__"))
+            .map(|s| {
+                s.split('_')
+                    .filter(|pair| pair.contains('='))
+                    .map(String::from)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
 
     // 辅助方法：判断是否是寄存器传递指令
     fn is_reg_transfer_insn(&self, line_text: &str) -> bool {
@@ -168,7 +194,7 @@ impl TaintEngine {
 
     // 追踪内存写入
     fn trace_mem_write(&mut self, line_num: usize, reg: &str, value: &str, depth: usize) -> Option<TracePath> {
-        let pattern = format!("rw_.*{}={}", &reg[1..],value);
+        let pattern = format!("rw_.*{}={}", &reg[1..], value);
         println!("[regW] {}", pattern);
 
         let config = SearchConfig::new(pattern).with_regex(true);
@@ -176,14 +202,11 @@ impl TaintEngine {
         self.find_and_trace(line_num, &config, reg, depth)
     }
 
-    // 追踪寄存器传递
+    // 追踪寄存器传递,从rr__到rw__
     fn trace_reg_transfer(&mut self, line_num: usize, reg: &str, _value: &str, depth: usize) -> Option<TracePath> {
-        let pattern = format!("r[wr]__{}=", reg);
+        let pattern = format!("rr__{}=", reg);
         println!("[reg2reg]: {}", pattern);
-        let config = SearchConfig::new(pattern)
-            .with_regex(true)
-            .with_max_results(1)
-            .with_line_range(None, Some(line_num));
+        let config = SearchConfig::new(pattern).with_regex(true);
 
         self.find_and_trace(line_num, &config, reg, depth)
     }
@@ -193,7 +216,7 @@ impl TaintEngine {
         let mut sources = Vec::new();
         // 先判断是否相同，再逐个跟踪
         for reg in regs {
-            let pattern = format!("rw__{}=", reg);
+            let pattern = format!("rw_.*{}", reg);
             println!("[arith] {}", pattern);
             let config = SearchConfig::new(pattern).with_regex(true);
 
@@ -212,7 +235,7 @@ impl TaintEngine {
     fn find_and_trace(&mut self, line_num: usize, config: &SearchConfig, target: &str, depth: usize) -> Option<TracePath> {
         self.service.find_prev(line_num, config.clone())
             .and_then(|prev| {
-                println!("{}: {}", prev.line_number + 1,
+                println!("\t{}: {}", prev.line_number + 1,
                          self.service.get_line_text(prev.line_number).unwrap_or_default());
                 self._trace_backward(prev.line_number, target, depth + 1)
             })
