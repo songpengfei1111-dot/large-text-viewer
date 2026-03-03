@@ -204,7 +204,7 @@ impl TaintEngine {
 
     // 追踪寄存器传递,从rr__到rw__
     fn trace_reg_transfer(&mut self, line_num: usize, reg: &str, _value: &str, depth: usize) -> Option<TracePath> {
-        let pattern = format!("rr__{}=", reg);
+        let pattern = format!("rr__{}={}", reg,_value);
         println!("[reg2reg]: {}", pattern);
         let config = SearchConfig::new(pattern).with_regex(true);
 
@@ -263,4 +263,4 @@ pub fn test_taint() -> anyhow::Result<()> {
     Ok(())
 }
 
-//shdow_mem
+// 需要完善的 shdow_mem 和 reg解析
