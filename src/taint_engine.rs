@@ -75,9 +75,9 @@ impl TaintEngine {
         }
         // 处理内存写入 (st)
         else if line_text.contains("st__") {
-            if let Some((reg, value)) = self.extract_reg_value(&line_text) {
-                path.trace_type = TraceType::RegToMem(reg.clone());
-                path.sources = self.trace_mem_write(line_num, &reg, &value, depth)
+            if let Some((src_reg, value)) = self.extract_reg_value(&line_text) {
+                path.trace_type = TraceType::RegToMem(src_reg.clone());
+                path.sources = self.trace_mem_write(line_num, &src_reg, &value, depth)
                     .into_iter().collect();
             }
         }
@@ -110,7 +110,6 @@ impl TaintEngine {
 
     // 辅助方法：提取ld指令的内存地址
     fn extract_ld_addr(&self, line_text: &str) -> Option<String> {
-        //TODO 这里可以简化，毕竟是结构化数据
         line_text.split(';')
             .find(|p| p.contains("ld__"))
             .map(|addr| {
@@ -162,8 +161,7 @@ impl TaintEngine {
     fn trace_mem_read(&mut self, line_num: usize, addr: &str, depth: usize) -> Option<TracePath> {
         let pattern = format!("st__{}_", addr);
         println!("[mem2mem]: {}", pattern);
-        let config = SearchConfig::new(pattern)
-            .with_regex(true);
+        let config = SearchConfig::new(pattern).with_regex(true);
 
         self.find_and_trace(line_num, &config, addr, depth)
     }
@@ -173,8 +171,7 @@ impl TaintEngine {
         let pattern = format!("rw_.*{}={}", &reg[1..],value);
         println!("[regW] {}", pattern);
 
-        let config = SearchConfig::new(pattern)
-            .with_regex(true);
+        let config = SearchConfig::new(pattern).with_regex(true);
 
         self.find_and_trace(line_num, &config, reg, depth)
     }
@@ -198,10 +195,8 @@ impl TaintEngine {
         for reg in regs {
             let pattern = format!("rw__{}=", reg);
             println!("[arith] {}", pattern);
-            let config = SearchConfig::new(pattern)
-                .with_regex(true)
-                .with_max_results(1)
-                .with_line_range(None, Some(line_num));
+            let config = SearchConfig::new(pattern).with_regex(true);
+
 
             if let Some(prev) = self.service.find_prev(line_num, config) {
                 println!("\t\t↳追踪分支: {}", reg);

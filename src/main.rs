@@ -1,3 +1,4 @@
+mod test_reg;
 
 mod cli_core;
 mod taint_engine;
@@ -17,9 +18,9 @@ mod search_service;  // 添加这一行
 // }
 
 fn main() {
-    let _ = taint_engine::test_taint();
+    // let _ = taint_engine::test_taint();
+    test_reg::test_reg();
 }
-
 
 
 
