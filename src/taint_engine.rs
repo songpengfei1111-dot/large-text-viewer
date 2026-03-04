@@ -3,6 +3,8 @@ use crate::search_service::{SearchService, SearchConfig};
 use anyhow::Result;
 use std::collections::HashSet;
 
+const SEP: &str = ";";
+
 pub struct TaintEngine {
     service: SearchService,
     max_depth: usize,
@@ -56,7 +58,7 @@ impl TaintEngine {
         self.visited.insert(line_num);
 
         let line_text = self.service.get_line_text(line_num)?;
-
+        if (depth == 0){ println!("[target line]: {}",line_text);}
 
         let mut path = TracePath {
             line_num,
@@ -75,6 +77,7 @@ impl TaintEngine {
                     .into_iter().collect();
             }
         }
+
         // 处理内存写入 (st)
         else if line_text.contains("st__") {
             if let Some((src_reg, value)) = self.extract_reg_value(&line_text) {
@@ -83,6 +86,7 @@ impl TaintEngine {
                     .into_iter().collect();
             }
         }
+
         // 处理寄存器传递 (mov/ldr/cbz/cbnz)
         else if self.is_reg_transfer_insn(&line_text) {
             if let Some((src_reg, value)) = self.extract_reg_value(&line_text) {
@@ -92,6 +96,7 @@ impl TaintEngine {
                     .into_iter().collect();
             }
         }
+
         // 处理算术运算
         else if self.is_arith_insn(&line_text) {
             println!("[AlgOp]");
@@ -110,7 +115,7 @@ impl TaintEngine {
 
     // 辅助方法：提取ld指令的内存地址
     fn extract_ld_addr(&self, line_text: &str) -> Option<String> {
-        line_text.split(';')
+        line_text.split(SEP)
             .find(|p| p.contains("ld__"))
             .map(|addr| {
                 addr.rsplit('_').nth(1)
@@ -122,7 +127,7 @@ impl TaintEngine {
     // 辅助方法：提取寄存器和值
     fn extract_reg_value(&self, line_text: &str) -> Option<(String, String)> {
         // TODO 对于多个寄存器的处理
-        line_text.split(';')
+        line_text.split(SEP)
             .find(|p| p.starts_with("rr__"))
             .and_then(|part| part.strip_prefix("rr__"))
             .and_then(|s| s.split('_').next())
@@ -131,7 +136,7 @@ impl TaintEngine {
     }
 
     fn extract_reg_values(line_text: &str) -> Vec<(String, String)> {
-        line_text.split(';')
+        line_text.split(SEP)
             .find(|p| p.starts_with("rr__"))
             .and_then(|part| part.strip_prefix("rr__"))
             .map(|s| {
@@ -146,7 +151,7 @@ impl TaintEngine {
 
     // 辅助方法：提取所有源寄存器
     fn extract_src_regs(&self, line_text: &str) -> Vec<String> {
-        line_text.split(';')
+        line_text.split(SEP)
             .filter(|p| p.starts_with("rr__"))
             .filter_map(|s| s.split('=').next())
             .filter_map(|s| s.strip_prefix("rr__"))
@@ -156,7 +161,7 @@ impl TaintEngine {
 
     //["w22=0x1", "w22=0x1"]
     fn extract_reg_pairs(&self, line_text: &str) -> Vec<String> {
-        line_text.split(';')
+        line_text.split(SEP)
             .find(|p| p.starts_with("rr__"))
             .and_then(|part| part.strip_prefix("rr__"))
             .map(|s| {
@@ -185,6 +190,7 @@ impl TaintEngine {
 
     // 追踪内存读取
     fn trace_mem_read(&mut self, line_num: usize, addr: &str, depth: usize) -> Option<TracePath> {
+        // 这里要使用shawo mem分析
         let pattern = format!("st__{}_", addr);
         println!("[mem2mem]: {}", pattern);
         let config = SearchConfig::new(pattern).with_regex(true);
@@ -216,13 +222,15 @@ impl TaintEngine {
         let mut sources = Vec::new();
         // 先判断是否相同，再逐个跟踪
         for reg in regs {
-            let pattern = format!("rw_.*{}", reg);
+            let pattern = format!("rw_.*{}", &reg[1..]); //考虑特殊寄存器
             println!("[arith] {}", pattern);
             let config = SearchConfig::new(pattern).with_regex(true);
 
 
             if let Some(prev) = self.service.find_prev(line_num, config) {
-                println!("\t\t↳追踪分支: {}", reg);
+                println!("\t{}: {}", prev.line_number + 1,
+                         self.service.get_line_text(prev.line_number).unwrap_or_default());
+
                 if let Some(source) = self._trace_backward(prev.line_number, &reg, depth + 1) {
                     sources.push(source);
                 }
@@ -249,7 +257,7 @@ impl TaintEngine {
 pub fn test_taint() -> anyhow::Result<()> {
     use large_text_core::file_reader::FileReader;
 
-    let file_path = std::path::PathBuf::from("/Users/teng/RustroverProjects/large-text-viewer/logs/record.csv");
+    let file_path = std::path::PathBuf::from("/Users/teng/RustroverProjects/large-text-viewer/logs/record_01.csv");
     let reader = FileReader::new(file_path, encoding_rs::UTF_8)?;
     let service = SearchService::new(reader);
 

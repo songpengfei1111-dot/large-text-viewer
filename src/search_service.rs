@@ -145,7 +145,7 @@ impl SearchService {
             config.case_sensitive,
         );
 
-        let (tx, rx) = mpsc::sync_channel(10_000);
+        let (tx, rx) = mpsc::sync_channel(1_000);
         let cancel_token = Arc::new(AtomicBool::new(false));
 
         // 计算行范围过滤器（转换为0-based）
@@ -170,6 +170,7 @@ impl SearchService {
         let mut last_line_shown = None;
 
         // 这个过程可以是异步的，并且可以添加额外的filter
+        // 减少for的次数
         loop {
             match rx.recv() {
                 Ok(SearchMessage::ChunkResult(chunk)) => {
