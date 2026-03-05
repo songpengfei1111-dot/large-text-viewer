@@ -6,6 +6,10 @@ use std::collections::HashSet;
 
 const SEP: &str = ";";
 
+// 寄存器字段前缀常量
+const PREFIX_REG_READ: &str = "rr__";
+const PREFIX_REG_WRITE: &str = "rw__";
+
 pub struct TaintEngine {
     service: SearchService,
     max_depth: usize,
@@ -162,7 +166,7 @@ impl TaintEngine {
             }
             InsnType::Move | InsnType::Branch => {
                 // 处理寄存器传递 (mov) 和分支指令
-                let values = InsnAnalyzer::extract_reg_values(&line_text, "rr__");
+                let values = InsnAnalyzer::extract_reg_values(&line_text, PREFIX_REG_READ);
                 if let Some((src_reg, value)) = values.first() {
                     path.trace_type = TraceType::RegToReg(src_reg.clone());
                     path.sources = self.trace_reg_transfer(line_num, src_reg, value, depth)
@@ -173,8 +177,8 @@ impl TaintEngine {
                 // 处理算术/逻辑运算
                 println!("[AlgOp]");
                 let src_regs: Vec<String> = line_text.split(SEP)
-                    .find(|p| p.starts_with("rr__"))
-                    .and_then(|part| part.strip_prefix("rr__"))
+                    .find(|p| p.starts_with(PREFIX_REG_READ))
+                    .and_then(|part| part.strip_prefix(PREFIX_REG_READ))
                     .map(|s| s.split('_')
                         .filter(|pair| pair.contains('='))
                         .map(String::from)
@@ -246,7 +250,7 @@ impl TaintEngine {
             None => return true, // 无法获取，跳过校验
         };
         
-        let write_values = InsnAnalyzer::extract_reg_values(&load_line_text, "rw__");
+        let write_values = InsnAnalyzer::extract_reg_values(&load_line_text, PREFIX_REG_WRITE);
         
         // 查找目标寄存器的写入值
         let target_reg = if let Some((reg, _, _)) = &self.current_byte_range {
@@ -263,7 +267,7 @@ impl TaintEngine {
         };
         
         // 从 Store 指令中提取实际写入的值
-        let actual_values = InsnAnalyzer::extract_reg_values(store_line_text, "rr__");
+        let actual_values = InsnAnalyzer::extract_reg_values(store_line_text, PREFIX_REG_READ);
         
         // 找到对应偏移位置的源寄存器
         let src_reg_index = (write_offset / 8).min(src_regs.len().saturating_sub(1));
@@ -350,64 +354,73 @@ impl TaintEngine {
         for (priority, pattern) in search_patterns.iter().enumerate() {
             self.debug_log(&format!("  [优先级 {}] {}: {}", priority + 1, pattern.description, pattern.pattern));
             
-            let config = SearchConfig::new(pattern.pattern.clone()).with_regex(pattern.is_regex);
-            
-            // 查找匹配的指令
-            let mut current_line = line_num;
-            loop {
-                if let Some(prev) = self.service.find_prev(current_line, config.clone()) {
-                    let prev_line_text = self.service.get_line_text(prev.line_number)?;
-                    
-                    // 解析写入指令
-                    if let Ok((src_regs, write_addr, write_size)) = InsnAnalyzer::parse_store_insn(&prev_line_text) {
-                        // 检查内存重叠
-                        if let Some((write_offset, overlap_size)) = InsnAnalyzer::check_memory_overlap(
-                            addr, size, write_addr, write_size
-                        ) {
-                            println!("  ✓ 找到匹配 [行 {}]: write[0x{:x}+{}:{}] -> read[0x{:x}:0x{:x}]", 
-                                     prev.line_number + 1,
-                                     write_addr,
-                                     write_offset,
-                                     write_offset + overlap_size,
-                                     addr,
-                                     addr + size as u64);
-                            
-                            self.debug_log(&format!("    {}", prev_line_text.split(';').take(5).collect::<Vec<_>>().join(";")));
-
-                            // 值校验：检查写入的值是否与我们追踪的值匹配
-                            if !self.validate_store_value(line_num, &prev_line_text, &dst_regs, &src_regs, write_offset) {
-                                current_line = prev.line_number;
-                                continue;
-                            }
-                            
-                            // 追踪源寄存器的特定字节范围
-                            if let Some(result) = self.trace_source_register(
-                                prev.line_number, &src_regs, write_offset, overlap_size, write_size, depth
-                            ) {
-                                return Some(result);
-                            }
-
-                            return self._trace_backward(prev.line_number, &format!("0x{:x}", addr), depth + 1);
-                        } else {
-                            // 地址不匹配，继续向前搜索
-                            self.debug_log(&format!("    [跳过] 地址不匹配: 0x{:x} vs 0x{:x}", write_addr, addr));
-                            current_line = prev.line_number;
-                            continue;
-                        }
-                    }
-                    
-                    // 解析失败，继续搜索
-                    current_line = prev.line_number;
-                } else {
-                    // 当前 pattern 没有找到结果，尝试下一个优先级
-                    self.debug_log("  ✗ 未找到匹配");
-                    break;
-                }
+            if let Some(result) = self.search_with_pattern(line_num, pattern, addr, size, dst_regs, depth) {
+                return Some(result);
             }
         }
         
         println!("❌ 所有搜索策略均未找到来源");
         None
+    }
+
+    /// 使用指定的 pattern 搜索匹配的 store 指令
+    fn search_with_pattern(
+        &mut self,
+        line_num: usize,
+        pattern: &crate::insn_analyzer::SearchPattern,
+        addr: u64,
+        size: usize,
+        dst_regs: &[String],
+        depth: usize,
+    ) -> Option<TracePath> {
+        let config = SearchConfig::new(pattern.pattern.clone()).with_regex(pattern.is_regex);
+        let mut current_line = line_num;
+        
+        loop {
+            let prev = self.service.find_prev(current_line, config.clone())?;
+            let prev_line_text = self.service.get_line_text(prev.line_number)?;
+            
+            // 解析写入指令
+            if let Ok((src_regs, write_addr, write_size)) = InsnAnalyzer::parse_store_insn(&prev_line_text) {
+                // 检查内存重叠
+                if let Some((write_offset, overlap_size)) = InsnAnalyzer::check_memory_overlap(
+                    addr, size, write_addr, write_size
+                ) {
+                    println!("  ✓ 找到匹配 [行 {}]: write[0x{:x}+{}:{}] -> read[0x{:x}:0x{:x}]", 
+                             prev.line_number + 1,
+                             write_addr,
+                             write_offset,
+                             write_offset + overlap_size,
+                             addr,
+                             addr + size as u64);
+                    
+                    self.debug_log(&format!("    {}", prev_line_text.split(';').take(5).collect::<Vec<_>>().join(";")));
+
+                    // 值校验：检查写入的值是否与我们追踪的值匹配
+                    if !self.validate_store_value(line_num, &prev_line_text, dst_regs, &src_regs, write_offset) {
+                        current_line = prev.line_number;
+                        continue;
+                    }
+                    
+                    // 追踪源寄存器的特定字节范围
+                    if let Some(result) = self.trace_source_register(
+                        prev.line_number, &src_regs, write_offset, overlap_size, write_size, depth
+                    ) {
+                        return Some(result);
+                    }
+
+                    return self._trace_backward(prev.line_number, &format!("0x{:x}", addr), depth + 1);
+                } else {
+                    // 地址不匹配，继续向前搜索
+                    self.debug_log(&format!("    [跳过] 地址不匹配: 0x{:x} vs 0x{:x}", write_addr, addr));
+                    current_line = prev.line_number;
+                    continue;
+                }
+            }
+            
+            // 解析失败，继续搜索
+            current_line = prev.line_number;
+        }
     }
 
     // 追踪内存写入（使用 InsnAnalyzer 和 ShadowMemory）
@@ -421,7 +434,7 @@ impl TaintEngine {
         
         // 从指令中提取寄存器值
         let line_text = self.service.get_line_text(line_num)?;
-        let reg_values = InsnAnalyzer::extract_reg_values(&line_text, "rr__");
+        let reg_values = InsnAnalyzer::extract_reg_values(&line_text, PREFIX_REG_READ);
         
         if let Some((_, value)) = reg_values.iter().find(|(r, _)| r == src_reg) {
             

@@ -4,6 +4,15 @@ use anyhow::{Result, anyhow};
 
 const SEP: &str = ";";
 
+// 寄存器字段前缀常量
+const PREFIX_REG_READ: &str = "rr__";
+const PREFIX_REG_WRITE: &str = "rw__";
+const PREFIX_MEM_LOAD: &str = "ld__";
+const PREFIX_MEM_STORE: &str = "st__";
+
+// 常见的内存访问大小（字节）
+const COMMON_MEM_SIZES: &[usize] = &[16, 8, 4, 2, 1];
+
 /// 指令类型
 #[derive(Debug, Clone, PartialEq)]
 pub enum InsnType {
@@ -36,35 +45,34 @@ impl InsnAnalyzer {
         if let Some(insn_name) = parts.get(3) {
             let insn = insn_name.trim().to_lowercase();
             
-            if insn.starts_with("ldr") || insn.starts_with("ldp") || 
-               insn.starts_with("ldur") || insn.starts_with("ldar") {
+            const LOAD_PREFIXES: &[&str] = &["ldr", "ldp", "ldur", "ldar"];
+            const STORE_PREFIXES: &[&str] = &["str", "stp", "stur", "stlr"];
+            const MOVE_PREFIXES: &[&str] = &["mov", "mvn"];
+            const ARITH_PREFIXES: &[&str] = &["add", "sub", "mul", "div", "neg", "adc", "sbc"];
+            const LOGIC_PREFIXES: &[&str] = &["and", "orr", "eor", "bic", "orn", "eon"];
+            const BRANCH_PREFIXES: &[&str] = &["cbz", "cbnz", "tbz", "tbnz"];
+            
+            if LOAD_PREFIXES.iter().any(|prefix| insn.starts_with(prefix)) {
                 return InsnType::Load;
             }
             
-            if insn.starts_with("str") || insn.starts_with("stp") || 
-               insn.starts_with("stur") || insn.starts_with("stlr") {
+            if STORE_PREFIXES.iter().any(|prefix| insn.starts_with(prefix)) {
                 return InsnType::Store;
             }
             
-            if insn.starts_with("mov") || insn.starts_with("mvn") {
+            if MOVE_PREFIXES.iter().any(|prefix| insn.starts_with(prefix)) {
                 return InsnType::Move;
             }
             
-            if insn.starts_with("add") || insn.starts_with("sub") || 
-               insn.starts_with("mul") || insn.starts_with("div") ||
-               insn.starts_with("neg") || insn.starts_with("adc") ||
-               insn.starts_with("sbc") {
+            if ARITH_PREFIXES.iter().any(|prefix| insn.starts_with(prefix)) {
                 return InsnType::Arith;
             }
             
-            if insn.starts_with("and") || insn.starts_with("orr") || 
-               insn.starts_with("eor") || insn.starts_with("bic") ||
-               insn.starts_with("orn") || insn.starts_with("eon") {
+            if LOGIC_PREFIXES.iter().any(|prefix| insn.starts_with(prefix)) {
                 return InsnType::Logic;
             }
             
-            if insn.starts_with("cbz") || insn.starts_with("cbnz") || 
-               insn.starts_with("tbz") || insn.starts_with("tbnz") ||
+            if BRANCH_PREFIXES.iter().any(|prefix| insn.starts_with(prefix)) || 
                insn == "b" || insn.starts_with("b.") {
                 return InsnType::Branch;
             }
@@ -73,89 +81,76 @@ impl InsnAnalyzer {
         InsnType::Unknown
     }
 
-    /// 解析加载指令 (ldr, ldp等)
-    /// 返回: (目标寄存器列表, 内存地址, 访问大小)
-    pub fn parse_load_insn(line_text: &str) -> Result<(Vec<String>, u64, usize)> {
+    /// 通用的内存指令解析方法
+    /// marker: "ld__" 或 "st__"
+    /// 返回: (寄存器列表, 内存地址, 访问大小)
+    fn parse_mem_insn(line_text: &str, marker: &str) -> Result<(Vec<String>, u64, usize)> {
         let parts: Vec<&str> = line_text.split(SEP).collect();
         
-        // 查找 ld__ 标记来获取内存地址和大小
-        let ld_info = parts.iter()
-            .find(|p| p.starts_with("ld__"))
-            .ok_or_else(|| anyhow!("No ld__ marker found"))?;
+        // 查找标记来获取内存地址和大小
+        let mem_info = parts.iter()
+            .find(|p| p.starts_with(marker))
+            .ok_or_else(|| anyhow!("No {} marker found", marker))?;
         
-        // 解析 ld__6cf01586a0_4 -> addr=0x6cf01586a0, size=4
-        let ld_parts: Vec<&str> = ld_info.split('_').collect();
-        if ld_parts.len() < 3 {
-            return Err(anyhow!("Invalid ld__ format"));
+        // 解析 ld__6cf01586a0_4 或 st__6cf01586a0_16 -> addr, size
+        let mem_parts: Vec<&str> = mem_info.split('_').collect();
+        if mem_parts.len() < 3 {
+            return Err(anyhow!("Invalid {} format", marker));
         }
         
-        let addr_str = ld_parts[ld_parts.len() - 2];
-        let size_str = ld_parts[ld_parts.len() - 1];
+        let addr_str = mem_parts[mem_parts.len() - 2];
+        let size_str = mem_parts[mem_parts.len() - 1];
         
         let addr = u64::from_str_radix(addr_str, 16)
             .map_err(|_| anyhow!("Invalid address: {}", addr_str))?;
         let size = size_str.parse::<usize>()
             .map_err(|_| anyhow!("Invalid size: {}", size_str))?;
         
-        // 从 rw__ 字段提取目标寄存器
-        let dst_regs = Self::extract_write_regs(line_text);
+        // 根据标记类型提取对应的寄存器
+        let regs = if marker == PREFIX_MEM_LOAD {
+            Self::extract_write_regs(line_text)  // load 指令写入寄存器
+        } else {
+            Self::extract_read_regs(line_text)   // store 指令读取寄存器
+        };
         
-        Ok((dst_regs, addr, size))
+        Ok((regs, addr, size))
+    }
+
+    /// 解析加载指令 (ldr, ldp等)
+    /// 返回: (目标寄存器列表, 内存地址, 访问大小)
+    pub fn parse_load_insn(line_text: &str) -> Result<(Vec<String>, u64, usize)> {
+        Self::parse_mem_insn(line_text, PREFIX_MEM_LOAD)
     }
 
     /// 解析存储指令 (str, stp等)
     /// 返回: (源寄存器列表, 内存地址, 访问大小)
     pub fn parse_store_insn(line_text: &str) -> Result<(Vec<String>, u64, usize)> {
-        let parts: Vec<&str> = line_text.split(SEP).collect();
-        
-        // 查找 st__ 标记
-        let st_info = parts.iter()
-            .find(|p| p.starts_with("st__"))
-            .ok_or_else(|| anyhow!("No st__ marker found"))?;
-        
-        // 解析 st__6cf01586a0_16 -> addr=0x6cf01586a0, size=16
-        let st_parts: Vec<&str> = st_info.split('_').collect();
-        if st_parts.len() < 3 {
-            return Err(anyhow!("Invalid st__ format"));
-        }
-        
-        let addr_str = st_parts[st_parts.len() - 2];
-        let size_str = st_parts[st_parts.len() - 1];
-        
-        let addr = u64::from_str_radix(addr_str, 16)
-            .map_err(|_| anyhow!("Invalid address: {}", addr_str))?;
-        let size = size_str.parse::<usize>()
-            .map_err(|_| anyhow!("Invalid size: {}", size_str))?;
-        
-        // 从 rr__ 字段提取源寄存器
-        let src_regs = Self::extract_read_regs(line_text);
-        
-        Ok((src_regs, addr, size))
+        Self::parse_mem_insn(line_text, PREFIX_MEM_STORE)
     }
 
     /// 提取读取的寄存器 (rr__ 字段)
     pub fn extract_read_regs(line_text: &str) -> Vec<String> {
-        Self::extract_regs_by_prefix(line_text, "rr__")
+        Self::extract_reg_values(line_text, PREFIX_REG_READ)
+            .into_iter()
+            .map(|(reg, _)| reg)
+            .collect()
     }
 
     /// 提取写入的寄存器 (rw__ 字段)
     pub fn extract_write_regs(line_text: &str) -> Vec<String> {
-        Self::extract_regs_by_prefix(line_text, "rw__")
+        Self::extract_reg_values(line_text, PREFIX_REG_WRITE)
+            .into_iter()
+            .map(|(reg, _)| reg)
+            .collect()
     }
 
-    /// 通用的寄存器提取方法
+    /// 通用的寄存器提取方法（已废弃，使用 extract_reg_values 代替）
+    #[deprecated(note = "Use extract_reg_values instead")]
     fn extract_regs_by_prefix(line_text: &str, prefix: &str) -> Vec<String> {
-        line_text.split(SEP)
-            .find(|p| p.starts_with(prefix))
-            .and_then(|part| part.strip_prefix(prefix))
-            .map(|s| {
-                s.split('_')
-                    .filter(|pair| pair.contains('='))
-                    .filter_map(|pair| pair.split_once('='))
-                    .map(|(reg, _val)| reg.to_string())
-                    .collect()
-            })
-            .unwrap_or_default()
+        Self::extract_reg_values(line_text, prefix)
+            .into_iter()
+            .map(|(reg, _)| reg)
+            .collect()
     }
 
     /// 提取寄存器及其值 (rr__ 或 rw__ 字段)
@@ -193,16 +188,14 @@ impl InsnAnalyzer {
         
         // 优先级1: 精确匹配地址（任意大小）
         patterns.push(SearchPattern {
-            pattern: format!("st__{:x}_", addr),
+            pattern: format!("{}{:x}_", PREFIX_MEM_STORE, addr),
             is_regex: false,
             description: format!("精确匹配: 写入地址 0x{:x}", addr),
         });
         
         // 优先级2-N: 向前查找可能覆盖该地址的写入
         // 对于常见的写入大小 (1, 2, 4, 8, 16 字节)，计算可能的起始地址
-        let common_sizes = [16, 8, 4, 2, 1]; // 从大到小，优先匹配大的写入
-        
-        for write_size in common_sizes {
+        for &write_size in COMMON_MEM_SIZES {
             // 计算可能的写入起始地址范围
             // 如果 write_addr + write_size > addr，则可能覆盖
             // 即 write_addr > addr - write_size
@@ -217,7 +210,7 @@ impl InsnAnalyzer {
                     // 只添加对齐的地址（提高效率）
                     if Self::is_aligned(candidate_addr, write_size) {
                         patterns.push(SearchPattern {
-                            pattern: format!("st__{:x}_{}", candidate_addr, write_size),
+                            pattern: format!("{}{:x}_{}", PREFIX_MEM_STORE, candidate_addr, write_size),
                             is_regex: false,
                             description: format!(
                                 "重叠匹配: 写入 0x{:x} ({} 字节) 可能覆盖 0x{:x}",
@@ -247,7 +240,7 @@ impl InsnAnalyzer {
     /// 生成单个内存读取的搜索pattern（向后兼容）
     pub fn gen_mem_read_pattern(addr: u64, size: usize) -> SearchPattern {
         SearchPattern {
-            pattern: format!("st__{:x}_", addr),
+            pattern: format!("{}{:x}_", PREFIX_MEM_STORE, addr),
             is_regex: false,
             description: format!("查找写入内存地址 0x{:x} 的指令", addr),
         }
