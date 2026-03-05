@@ -114,15 +114,8 @@ impl TaintEngine {
 
     fn _trace_backward(&mut self, line_num: usize, target: &str, depth: usize) -> Option<TracePath> {
         // 优化：提前检查深度和访问状态
-        if depth >= self.max_depth { 
-            return None;
-        }
-        
-        // 优化：避免重复追踪同一行
-        if self.visited.contains(&line_num) {
-            return None;
-        }
-        
+        if depth >= self.max_depth { return None;}
+
         self.visited.insert(line_num);
 
         let line_text = self.service.get_line_text(line_num)?;
