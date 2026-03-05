@@ -127,33 +127,9 @@ impl SearchService {
 
     /// 根据字节偏移量获取行号（使用二分查找优化）
     pub fn get_line_number(&self, byte_offset: usize) -> Option<usize> {
-        // 优化：使用二分查找而不是线性遍历
-        let total_lines = self.indexer.total_lines();
-        if total_lines == 0 {
-            return None;
-        }
-        
-        let mut left = 0;
-        let mut right = total_lines;
-        
-        while left < right {
-            let mid = left + (right - left) / 2;
-            
-            if let Some((start, end)) = self.indexer.get_line_range(mid) {
-                if byte_offset < start {
-                    right = mid;
-                } else if end != usize::MAX && byte_offset >= end {
-                    left = mid + 1;
-                } else {
-                    // byte_offset 在 [start, end) 范围内
-                    return Some(mid);
-                }
-            } else {
-                return None;
-            }
-        }
-        
-        None
+        // 直接使用 text_cache 的二分查找方法
+        self.text_cache.get_line_info_by_offset(byte_offset)
+            .map(|info| info.line_number)
     }
 
     /// 收集匹配行及其上下文的辅助方法

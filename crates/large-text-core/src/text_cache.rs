@@ -206,23 +206,19 @@ impl TextCache {
         self.reader.as_ref()
     }
 
-    /// 根据字节偏移量获取行信息
+    /// 根据字节偏移量获取行信息（使用二分查找优化）
     pub fn get_line_info_by_offset(&self, byte_offset: usize) -> Option<LineInfo> {
         let indexer = self.indexer.as_ref()?;
 
-        // 遍历所有行找到包含该偏移量的行
-        for line_num in 0..indexer.total_lines() {
-            if let Some((start_offset, end_offset)) = indexer.get_line_range(line_num) {
-                if byte_offset >= start_offset && (end_offset == usize::MAX || byte_offset < end_offset) {
-                    return Some(LineInfo {
-                        line_number: line_num,
-                        start_offset,
-                        end_offset,
-                    });
-                }
-            }
-        }
-        None
+        // 使用 LineIndexer 的二分查找方法 - O(log n) 而不是 O(n)
+        let line_num = indexer.find_line_at_offset(byte_offset);
+        let (start_offset, end_offset) = indexer.get_line_range(line_num)?;
+        
+        Some(LineInfo {
+            line_number: line_num,
+            start_offset,
+            end_offset,
+        })
     }
 }
 
