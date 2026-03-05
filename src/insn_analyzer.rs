@@ -330,10 +330,7 @@ impl InsnAnalyzer {
     }
 
     /// 判断是否是常量/立即数
-    pub fn is_constant_value(value: &str) -> bool {
-        // 检查是否是立即数 (以 # 开头) 或零寄存器
-        value.starts_with('#') || value.contains("zr")
-    }
+    pub fn is_constant_value(value: &str) -> bool { value.starts_with('#') || value.contains("zr") }
     
     /// 判断寄存器是否是零寄存器（常量）
     pub fn is_zero_register(reg: &str) -> bool {

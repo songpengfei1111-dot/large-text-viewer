@@ -274,7 +274,7 @@ impl TaintEngine {
                                 println!("    {}", prev_line_text.split(';').take(5).collect::<Vec<_>>().join(";"));
                             }
 
-          
+
                             // 值校验：检查写入的值是否与我们追踪的值匹配
                             // 注意：只在寄存器类型相同时才进行值校验
                             let expected_value = {
@@ -459,12 +459,12 @@ impl TaintEngine {
                 println!("[arith] 跳过零寄存器: {}", reg);
                 continue;
             }
-            
+
             if InsnAnalyzer::is_constant_value(val) {
                 println!("[arith] 跳过常量值: {}", val);
                 continue;
             }
-            
+
             println!("[arith] {}", pattern.pattern);
             let config = SearchConfig::new(pattern.pattern.clone()).with_regex(pattern.is_regex);
 
