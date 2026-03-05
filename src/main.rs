@@ -4,6 +4,7 @@ mod cli_core;
 mod taint_engine;
 mod search_service;  // 添加这一行
 
+mod insn_il;
 // use std::env;
 // fn main() -> eframe::Result<()> {
     // 检查是否有命令行参数
@@ -18,6 +19,10 @@ mod search_service;  // 添加这一行
 // }
 
 fn main() {
-    let _ = taint_engine::test_taint();
+    // let _ = taint_engine::test_taint();
+    // let _ = taint_engine::test_taint_1();
     // test_reg::test_reg();
+    // insn_il::test_parse_single();
+    insn_il::test_parse_instruction();
+
 }

@@ -272,3 +272,20 @@ pub fn test_taint() -> anyhow::Result<()> {
 }
 
 // 需要完善的 shdow_mem 和 reg解析
+
+pub fn test_taint_1() -> anyhow::Result<()> {
+    use large_text_core::file_reader::FileReader;
+
+    let file_path = std::path::PathBuf::from("/Users/teng/RustroverProjects/large-text-viewer/logs/record_01.csv");
+    let reader = FileReader::new(file_path, encoding_rs::UTF_8)?;
+    let service = SearchService::new(reader);
+
+    let mut engine = TaintEngine::new(service).with_max_depth(15);
+
+    println!("\n=== 追踪内存地址: ===\n");
+    if let Some(trace) = engine.trace_backward(1256114, "ld__6eac18cbd4_1")? {
+        // trace.print();
+    }
+
+    Ok(())
+}

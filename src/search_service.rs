@@ -6,6 +6,7 @@ use anyhow::Result;
 use large_text_core::file_reader::FileReader;
 use large_text_core::line_indexer::LineIndexer;
 use large_text_core::search_engine::{SearchEngine, SearchMessage, SearchType};
+use large_text_core::search_engine::SearchResult;
 
 /// 搜索结果项
 #[derive(Debug, Clone)]
@@ -136,9 +137,51 @@ impl SearchService {
         None
     }
 
+    /// 收集匹配行及其上下文的辅助方法
+    fn collect_matches_with_context(
+        &self,
+        summary: &mut SearchSummary,
+        last_line_shown: &mut Option<usize>,
+        config: &SearchConfig,
+        line_num: usize,
+        result: &SearchResult,
+    ) {
+        // 计算需要显示的行范围（始终包含匹配行本身）
+        let start_ctx = if config.context_lines > 0 {
+            line_num.saturating_sub(config.context_lines)
+        } else {
+            line_num  // 没有上下文时只显示匹配行
+        };
+
+        let end_ctx = if config.context_lines > 0 {
+            (line_num + 1 + config.context_lines).min(self.total_lines())
+        } else {
+            line_num + 1  // 只显示匹配行
+        };
+
+        // 统一循环处理所有需要显示的行
+        for ctx_line in start_ctx..end_ctx {
+            if let Some(last) = *last_line_shown {
+                if ctx_line <= last {
+                    continue;
+                }
+            }
+
+            if let Some(line_text) = self.get_line_text(ctx_line) {
+                summary.matches.push(SearchMatch {
+                    line_number: ctx_line,
+                    byte_offset: result.byte_offset,
+                    match_length: result.match_len,
+                    line_text,
+                });
+                *last_line_shown = Some(ctx_line);
+            }
+        }
+    }
+
     /// 执行搜索并返回结果摘要
     pub fn search(&self, config: SearchConfig) -> Result<SearchSummary> {
-        let mut search_engine = SearchEngine::new();
+        let mut search_engine = SearchEngine::new(); //修改到类里，不要每次都新建
         search_engine.set_query(
             config.pattern.clone(),
             config.use_regex,
@@ -169,65 +212,32 @@ impl SearchService {
         let mut summary = SearchSummary::default();
         let mut last_line_shown = None;
 
-        // 这个过程可以是异步的，并且可以添加额外的filter
-        // 减少for的次数
         loop {
             match rx.recv() {
                 Ok(SearchMessage::ChunkResult(chunk)) => {
+                    // 先匹配再取行
                     for result in chunk.matches {
                         if summary.matches.len() >= config.max_results {
                             break;
                         }
 
-                        // 获取匹配所在的行
-                        if let Some(line_num) = self.get_line_number(result.byte_offset) {
-                            // 检查行范围过滤器
-                            if let Some((filter_start, filter_end)) = line_filter {
-                                if line_num < filter_start || line_num > filter_end {
-                                    continue;
-                                }
-                            }
+                        let Some(line_num) = self.get_line_number(result.byte_offset) else {
+                            continue;
+                        };
 
-                            // 如果有上下文行，收集上下文// TODO 这里代码可以简化
-                            if config.context_lines > 0 {
-                                let start_ctx = if line_num > config.context_lines {
-                                    line_num - config.context_lines
-                                } else {
-                                    0
-                                };
-                                let end_ctx = (line_num + 1 + config.context_lines)
-                                    .min(self.indexer.total_lines());
-
-                                for ctx_line in start_ctx..end_ctx {
-                                    // 避免重复
-                                    if let Some(last) = last_line_shown {
-                                        if ctx_line <= last {
-                                            continue;
-                                        }
-                                    }
-
-                                    if let Some(line_text) = self.get_line_text(ctx_line) {
-                                        summary.matches.push(SearchMatch {
-                                            line_number: ctx_line,
-                                            byte_offset: result.byte_offset,
-                                            match_length: result.match_len,
-                                            line_text,
-                                        });
-                                        last_line_shown = Some(ctx_line);
-                                    }
-                                }
-                            } else {
-                                // 只收集匹配行
-                                if let Some(line_text) = self.get_line_text(line_num) {
-                                    summary.matches.push(SearchMatch {
-                                        line_number: line_num,
-                                        byte_offset: result.byte_offset,
-                                        match_length: result.match_len,
-                                        line_text,
-                                    });
-                                }
+                        if let Some((filter_start, filter_end)) = line_filter {
+                            if line_num < filter_start || line_num > filter_end {
+                                continue;
                             }
                         }
+
+                        self.collect_matches_with_context(
+                            &mut summary,
+                            &mut last_line_shown,
+                            &config,
+                            line_num,
+                            &result,
+                        );
                     }
                 }
                 Ok(SearchMessage::Done(SearchType::Fetch)) => break,
@@ -254,7 +264,7 @@ impl SearchService {
 
         let (tx, rx) = mpsc::sync_channel(10);
         let cancel_token = Arc::new(AtomicBool::new(false));
-
+        // 启动了引擎后会自动取搜索
         search_engine.count_matches(self.reader.clone(), tx, cancel_token);
 
         let mut total = 0;
@@ -297,7 +307,4 @@ impl SearchService {
             .filter(|m| m.line_number < current_line)
             .last()
     }
-
 }
-
-//TODO 复用line_index并持久化
