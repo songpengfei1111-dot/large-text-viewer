@@ -1,6 +1,5 @@
 // taint_engine.rs
 use crate::search_service::{SearchService, SearchConfig};
-use crate::shadow_memory::ShadowMemory;
 use crate::insn_analyzer::{InsnAnalyzer, InsnType};
 use anyhow::Result;
 use std::collections::HashSet;
@@ -9,7 +8,6 @@ const SEP: &str = ";";
 
 pub struct TaintEngine {
     service: SearchService,
-    shadow_mem: ShadowMemory,  // 新增: Shadow Memory
     max_depth: usize,
     visited: HashSet<usize>,
     debug: bool,  // 添加调试开关
@@ -87,7 +85,6 @@ impl TaintEngine {
     pub fn new(service: SearchService) -> Self {
         Self {
             service,
-            shadow_mem: ShadowMemory::new(),  // 初始化 Shadow Memory
             max_depth: 10,
             visited: HashSet::new(),
             debug: false,  // 默认关闭调试
@@ -277,12 +274,7 @@ impl TaintEngine {
                                 println!("    {}", prev_line_text.split(';').take(5).collect::<Vec<_>>().join(";"));
                             }
 
-                            // 使用 shadow memory 传播污点（字节级）
-                            for dst_reg in dst_regs {
-                                // 从写入的偏移位置传播到目标寄存器
-                                self.shadow_mem.propagate_mem_to_reg(addr, size, dst_reg, 0);
-                            }
-                            
+          
                             // 值校验：检查写入的值是否与我们追踪的值匹配
                             // 注意：只在寄存器类型相同时才进行值校验
                             let expected_value = {
@@ -417,8 +409,6 @@ impl TaintEngine {
         let reg_values = InsnAnalyzer::extract_reg_values(&line_text, "rr__");
         
         if let Some((_, value)) = reg_values.iter().find(|(r, _)| r == src_reg) {
-            // 使用 shadow memory 传播污点
-            self.shadow_mem.propagate_reg_to_mem(src_reg, 0, addr, size);
             
             // 生成搜索 pattern
             let search_pattern = InsnAnalyzer::gen_reg_write_pattern(src_reg, value);

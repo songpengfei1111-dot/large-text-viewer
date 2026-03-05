@@ -1,7 +1,6 @@
 mod cli_core;
 mod taint_engine;
 mod search_service;
-mod shadow_memory;    // 新增
 mod insn_analyzer;    // 新增
 
 // use std::env;
