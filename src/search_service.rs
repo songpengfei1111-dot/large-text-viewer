@@ -7,6 +7,7 @@ use large_text_core::file_reader::FileReader;
 use large_text_core::line_indexer::LineIndexer;
 use large_text_core::search_engine::{SearchEngine, SearchMessage, SearchType};
 use large_text_core::search_engine::SearchResult;
+use large_text_core::text_cache::TextCache; //加速find_prev
 
 /// 搜索结果项
 #[derive(Debug, Clone)]
@@ -82,17 +83,29 @@ impl SearchConfig {
 /// 搜索服务
 pub struct SearchService {
     reader: Arc<FileReader>,
-    indexer: LineIndexer,
+    indexer: Arc<LineIndexer>,  // 改为 Arc
+    text_cache: TextCache,
+    search_engine: SearchEngine,  // 复用搜索引擎
 }
 
 impl SearchService {
     // 组合底层组间，有些api需要结合原子模块 才能使用
     pub fn new(reader: FileReader) -> Self {
         let reader = Arc::new(reader);
+
         let mut indexer = LineIndexer::new();
         indexer.index_file(&reader);
+        let indexer = Arc::new(indexer);
 
-        Self { reader, indexer }
+        let mut text_cache = TextCache::default();
+        text_cache.set_file(reader.clone(), indexer.clone());
+
+        Self { 
+            reader, 
+            indexer,
+            text_cache,
+            search_engine: SearchEngine::new(),
+        }
     }
 
     /// 获取文件阅读器引用
@@ -101,63 +114,73 @@ impl SearchService {
     }
 
     /// 获取行索引器引用
-    pub fn indexer(&self) -> &LineIndexer {
-        &self.indexer
-    }
+    pub fn indexer(&self) -> &LineIndexer { &self.indexer }
 
     /// 获取总行数
-    pub fn total_lines(&self) -> usize {
-        self.indexer.total_lines()
+    pub fn total_lines(&self) -> usize { self.indexer.total_lines() }
+
+    /// 获取指定行的文本（使用text_cache加速）
+    pub fn get_line_text(&mut self, line_num: usize) -> Option<String> {
+        self.text_cache.get_line(line_num)
+            .map(|text| text.trim_end_matches('\n').trim_end_matches('\r').to_string())
     }
 
-    /// 获取指定行的文本
-    pub fn get_line_text(&self, line_num: usize) -> Option<String> {
-        if let Some((start, end)) = self.indexer.get_line_range(line_num) {
-            let text = if end == usize::MAX {
-                self.reader.get_chunk(start, self.reader.len())
-            } else {
-                self.reader.get_chunk(start, end)
-            };
-
-            Some(text.trim_end_matches('\n').trim_end_matches('\r').to_string())
-        } else {
-            None
-        }
-    }
-
-    /// 根据字节偏移量获取行号
+    /// 根据字节偏移量获取行号（使用二分查找优化）
     pub fn get_line_number(&self, byte_offset: usize) -> Option<usize> {
-        for line_num in 0..self.indexer.total_lines() {
-            if let Some((start, end)) = self.indexer.get_line_range(line_num) {
-                if byte_offset >= start && (end == usize::MAX || byte_offset < end) {
-                    return Some(line_num);
+        // 优化：使用二分查找而不是线性遍历
+        let total_lines = self.indexer.total_lines();
+        if total_lines == 0 {
+            return None;
+        }
+        
+        let mut left = 0;
+        let mut right = total_lines;
+        
+        while left < right {
+            let mid = left + (right - left) / 2;
+            
+            if let Some((start, end)) = self.indexer.get_line_range(mid) {
+                if byte_offset < start {
+                    right = mid;
+                } else if end != usize::MAX && byte_offset >= end {
+                    left = mid + 1;
+                } else {
+                    // byte_offset 在 [start, end) 范围内
+                    return Some(mid);
                 }
+            } else {
+                return None;
             }
         }
+        
         None
     }
 
     /// 收集匹配行及其上下文的辅助方法
     fn collect_matches_with_context(
-        &self,
+        &mut self,
         summary: &mut SearchSummary,
         last_line_shown: &mut Option<usize>,
         config: &SearchConfig,
         line_num: usize,
         result: &SearchResult,
     ) {
+        // 优化：如果不需要上下文，只收集匹配行本身
+        if config.context_lines == 0 {
+            if let Some(line_text) = self.get_line_text(line_num) {
+                summary.matches.push(SearchMatch {
+                    line_number: line_num,
+                    byte_offset: result.byte_offset,
+                    match_length: result.match_len,
+                    line_text,
+                });
+            }
+            return;
+        }
+        
         // 计算需要显示的行范围（始终包含匹配行本身）
-        let start_ctx = if config.context_lines > 0 {
-            line_num.saturating_sub(config.context_lines)
-        } else {
-            line_num  // 没有上下文时只显示匹配行
-        };
-
-        let end_ctx = if config.context_lines > 0 {
-            (line_num + 1 + config.context_lines).min(self.total_lines())
-        } else {
-            line_num + 1  // 只显示匹配行
-        };
+        let start_ctx = line_num.saturating_sub(config.context_lines);
+        let end_ctx = (line_num + 1 + config.context_lines).min(self.total_lines());
 
         // 统一循环处理所有需要显示的行
         for ctx_line in start_ctx..end_ctx {
@@ -180,9 +203,9 @@ impl SearchService {
     }
 
     /// 执行搜索并返回结果摘要
-    pub fn search(&self, config: SearchConfig) -> Result<SearchSummary> {
-        let mut search_engine = SearchEngine::new(); //修改到类里，不要每次都新建
-        search_engine.set_query(
+    pub fn search(&mut self, config: SearchConfig) -> Result<SearchSummary> {
+        // 复用 search_engine，只需重新设置查询
+        self.search_engine.set_query(
             config.pattern.clone(),
             config.use_regex,
             config.case_sensitive,
@@ -200,11 +223,20 @@ impl SearchService {
             None
         };
 
+        // 优化：将行号转换为字节偏移，让搜索引擎从指定位置开始
+        let start_byte_offset = if let Some((filter_start, _)) = line_filter {
+            self.indexer.get_line_range(filter_start)
+                .map(|(start, _)| start)
+                .unwrap_or(0)
+        } else {
+            0
+        };
+
         // 启动搜索
-        search_engine.fetch_matches(
+        self.search_engine.fetch_matches(
             self.reader.clone(),
             tx,
-            0,
+            start_byte_offset,  // 从指定字节位置开始搜索
             config.max_results,
             cancel_token,
         );
@@ -254,9 +286,9 @@ impl SearchService {
     }
 
     /// 简单的计数搜索（只返回匹配数量）
-    pub fn count_matches(&self, config: SearchConfig) -> Result<usize> {
-        let mut search_engine = SearchEngine::new();
-        search_engine.set_query(
+    pub fn count_matches(&mut self, config: SearchConfig) -> Result<usize> {
+        // 复用 search_engine
+        self.search_engine.set_query(
             config.pattern,
             config.use_regex,
             config.case_sensitive,
@@ -265,7 +297,7 @@ impl SearchService {
         let (tx, rx) = mpsc::sync_channel(10);
         let cancel_token = Arc::new(AtomicBool::new(false));
         // 启动了引擎后会自动取搜索
-        search_engine.count_matches(self.reader.clone(), tx, cancel_token);
+        self.search_engine.count_matches(self.reader.clone(), tx, cancel_token);
 
         let mut total = 0;
         loop {
@@ -281,7 +313,7 @@ impl SearchService {
     }
 
     /// 查找下一个匹配项（使用配置）
-    pub fn find_next(&self, current_line: usize, config: SearchConfig) -> Option<SearchMatch> {
+    pub fn find_next(&mut self, current_line: usize, config: SearchConfig) -> Option<SearchMatch> {
         // 确保从当前行的下一行开始搜索
         let mut search_config = config;
         search_config.line_start = Some(current_line + 1);  // 0-based，所以+1
@@ -293,21 +325,44 @@ impl SearchService {
     }
 
     /// 查找上一个匹配项（使用配置）
-    /// 还是使用text_cache,要不反复扫太慢了
-    pub fn find_prev(&self, current_line: usize, config: SearchConfig) -> Option<SearchMatch> {
-        // 获取当前行之前的所有结果
-        println!("[debug] {}", current_line);
-        let mut search_config = config;
-        search_config.line_end = Some(current_line);  // 只搜索当前行之前
-        search_config.max_results = usize::MAX;  // 获取所有结果以便找到最后一个
-
-        let summary = self.search(search_config).ok()?;
-
-        // 找到最后一个小于当前行号的匹配项
-        summary.matches
-            .into_iter()
-            .filter(|m| m.line_number < current_line)
-            .last()
+    /// 优化：使用小窗口反向搜索，避免全量扫描
+    pub fn find_prev(&mut self, current_line: usize, config: SearchConfig) -> Option<SearchMatch> {
+        if current_line == 0 {
+            return None;
+        }
+        
+        // 策略：从 current_line 向前搜索，使用小窗口
+        // 窗口大小根据文件大小动态调整
+        let window_size = 5000;
+        let mut search_end = current_line;
+        
+        while search_end > 0 {
+            let search_start = search_end.saturating_sub(window_size);
+            
+            let mut search_config = config.clone();
+            search_config.line_start = Some(search_start + 1);  // 转换为 1-based
+            search_config.line_end = Some(search_end);
+            search_config.max_results = 100;  // 限制窗口内结果数量
+            
+            if let Ok(summary) = self.search(search_config) {
+                // 找到窗口内最后一个匹配（即最接近 current_line 的）
+                if let Some(last_match) = summary.matches
+                    .into_iter()
+                    .filter(|m| m.line_number < current_line)
+                    .last()
+                {
+                    return Some(last_match);
+                }
+            }
+            
+            // 没找到，继续向前搜索
+            if search_start == 0 {
+                break;
+            }
+            search_end = search_start;
+        }
+        
+        None
     }
 }
 

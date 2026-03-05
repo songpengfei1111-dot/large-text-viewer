@@ -151,7 +151,7 @@ impl CliProcessor {
     /// 处理行提取命令
     fn handle_lines(&self, file_path: PathBuf, start: usize, end: Option<usize>, count: Option<usize>, show_line_numbers: bool) -> Result<()> {
         let reader = FileReader::new(file_path, encoding_rs::UTF_8)?;
-        let service = SearchService::new(reader);
+        let mut service = SearchService::new(reader);
 
         let total_lines = service.total_lines();
         let start_line = start.saturating_sub(1); // 转换为0-based
@@ -185,7 +185,7 @@ impl CliProcessor {
     /// 处理搜索命令
     fn handle_search(&self, file_path: PathBuf, pattern: String, use_regex: bool, max_results: usize, context: usize, start: Option<usize>, end: Option<usize>, count_only: bool) -> Result<()> {
         let reader = FileReader::new(file_path, encoding_rs::UTF_8)?;
-        let service = SearchService::new(reader);
+        let mut service = SearchService::new(reader);
 
         let config = SearchConfig::new(pattern.clone())
             .with_regex(use_regex)
@@ -239,7 +239,7 @@ impl CliProcessor {
     /// 处理 find 命令
     fn handle_find(&self, file_path: PathBuf, pattern: String, line: usize, direction: u8, use_regex: bool, context: usize) -> Result<()> {
         let reader = FileReader::new(file_path, encoding_rs::UTF_8)?;
-        let service = SearchService::new(reader);
+        let mut service = SearchService::new(reader);
 
         // 转换为0-based行号
         let current_line = line.saturating_sub(1);

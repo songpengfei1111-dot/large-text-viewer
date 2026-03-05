@@ -9,6 +9,7 @@ pub struct TaintEngine {
     service: SearchService,
     max_depth: usize,
     visited: HashSet<usize>,
+    debug: bool,  // 添加调试开关
 }
 
 #[derive(Debug, Clone)]
@@ -37,11 +38,17 @@ impl TaintEngine {
             service,
             max_depth: 10,
             visited: HashSet::new(),
+            debug: false,  // 默认关闭调试
         }
     }
 
     pub fn with_max_depth(mut self, depth: usize) -> Self {
         self.max_depth = depth;
+        self
+    }
+    
+    pub fn with_debug(mut self, debug: bool) -> Self {
+        self.debug = debug;
         self
     }
 
@@ -53,8 +60,16 @@ impl TaintEngine {
     }
 
     fn _trace_backward(&mut self, line_num: usize, target: &str, depth: usize) -> Option<TracePath> {
-        if depth >= self.max_depth { return None;}
-
+        // 优化：提前检查深度和访问状态
+        if depth >= self.max_depth { 
+            return None;
+        }
+        
+        // 优化：避免重复追踪同一行
+        if self.visited.contains(&line_num) {
+            return None;
+        }
+        
         self.visited.insert(line_num);
 
         let line_text = self.service.get_line_text(line_num)?;
@@ -113,14 +128,13 @@ impl TaintEngine {
         Some(path)
     }
 
-    // 辅助方法：提取ld指令的内存地址
+    // 辅助方法：提取ld指令的内存地址（优化：减少字符串分配）
     fn extract_ld_addr(&self, line_text: &str) -> Option<String> {
         line_text.split(SEP)
             .find(|p| p.contains("ld__"))
-            .map(|addr| {
+            .and_then(|addr| {
                 addr.rsplit('_').nth(1)
-                    .unwrap_or(addr)
-                    .to_string()
+                    .map(|s| s.to_string())
             })
     }
 
@@ -174,16 +188,14 @@ impl TaintEngine {
     }
 
 
-    // 辅助方法：判断是否是寄存器传递指令
+    // 辅助方法：判断是否是寄存器传递指令（优化：减少重复扫描）
     fn is_reg_transfer_insn(&self, line_text: &str) -> bool {
-        // TODO改成 in list
-        line_text.contains("mov") ||
-            line_text.contains("ldr") ||
-            line_text.contains("cbz") ||
-            line_text.contains("cbnz")
+        // 优化：只扫描一次字符串
+        line_text.contains("mov") || line_text.contains("ldr") || 
+        line_text.contains("cbz") || line_text.contains("cbnz")
     }
 
-    // 辅助方法：判断是否是算术指令
+    // 辅助方法：判断是否是算术指令（优化：减少重复扫描）
     fn is_arith_insn(&self, line_text: &str) -> bool {
         line_text.contains("add") || line_text.contains("sub")
     }

@@ -10,7 +10,7 @@ pub struct TextCache {
     cached_start_offset: usize,
     cache_size: usize, // 缓存大小（行数）
     reader: Option<Arc<FileReader>>,
-    indexer: Option<LineIndexer>,
+    indexer: Option<Arc<LineIndexer>>,  // 改为 Arc
 }
 
 impl Default for TextCache {
@@ -36,7 +36,7 @@ impl TextCache {
     }
 
     /// 设置reader和indexer
-    pub fn set_file(&mut self, reader: Arc<FileReader>, indexer: LineIndexer) {
+    pub fn set_file(&mut self, reader: Arc<FileReader>, indexer: Arc<LineIndexer>) {
         self.reader = Some(reader);
         self.indexer = Some(indexer);
         self.clear_cache();
@@ -110,7 +110,7 @@ impl TextCache {
     fn update_cache_around_line(&mut self, center_line: usize) {
         // 先获取所有需要的引用
         let (reader, indexer) = match (&self.reader, &self.indexer) {
-            (Some(r), Some(i)) => (r.clone(), i),
+            (Some(r), Some(i)) => (r.clone(), i.as_ref()),
             _ => return,
         };
 
@@ -206,7 +206,32 @@ impl TextCache {
         self.reader.as_ref()
     }
 
+    /// 根据字节偏移量获取行信息
+    pub fn get_line_info_by_offset(&self, byte_offset: usize) -> Option<LineInfo> {
+        let indexer = self.indexer.as_ref()?;
 
+        // 遍历所有行找到包含该偏移量的行
+        for line_num in 0..indexer.total_lines() {
+            if let Some((start_offset, end_offset)) = indexer.get_line_range(line_num) {
+                if byte_offset >= start_offset && (end_offset == usize::MAX || byte_offset < end_offset) {
+                    return Some(LineInfo {
+                        line_number: line_num,
+                        start_offset,
+                        end_offset,
+                    });
+                }
+            }
+        }
+        None
+    }
+}
+
+/// 行信息结构体
+#[derive(Debug, Clone)]
+pub struct LineInfo {
+    pub line_number: usize,
+    pub start_offset: usize,
+    pub end_offset: usize,
 }
 
 
