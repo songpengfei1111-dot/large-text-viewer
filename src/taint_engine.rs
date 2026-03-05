@@ -193,7 +193,7 @@ impl TaintEngine {
         // 这里要使用shawo mem分析
         let pattern = format!("st__{}_", addr);
         println!("[mem2mem]: {}", pattern);
-        let config = SearchConfig::new(pattern).with_regex(true);
+        let config = SearchConfig::new(pattern).with_regex(false);
 
         self.find_and_trace(line_num, &config, addr, depth)
     }
@@ -243,8 +243,7 @@ impl TaintEngine {
     fn find_and_trace(&mut self, line_num: usize, config: &SearchConfig, target: &str, depth: usize) -> Option<TracePath> {
         self.service.find_prev(line_num, config.clone())
             .and_then(|prev| {
-                println!("\t{}: {}", prev.line_number + 1,
-                         self.service.get_line_text(prev.line_number).unwrap_or_default());
+                println!("\t{}: {}", prev.line_number + 1, self.service.get_line_text(prev.line_number).unwrap_or_default());
                 self._trace_backward(prev.line_number, target, depth + 1)
             })
             .or_else(|| {
@@ -283,7 +282,8 @@ pub fn test_taint_1() -> anyhow::Result<()> {
     let mut engine = TaintEngine::new(service).with_max_depth(15);
 
     println!("\n=== 追踪内存地址: ===\n");
-    if let Some(trace) = engine.trace_backward(1256114, "ld__6eac18cbd4_1")? {
+    // if let Some(trace) = engine.trace_backward(11923, "st__6cf0157918_8")? { //err
+    if let Some(trace) = engine.trace_backward(11922-1, "st__6cf0157918_8")? {
         // trace.print();
     }
 

@@ -20,9 +20,9 @@ mod insn_il;
 
 fn main() {
     // let _ = taint_engine::test_taint();
-    // let _ = taint_engine::test_taint_1();
+    let _ = taint_engine::test_taint_1();
     // test_reg::test_reg();
     // insn_il::test_parse_single();
-    insn_il::test_parse_instruction();
+    // insn_il::test_parse_instruction();
 
 }

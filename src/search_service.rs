@@ -293,8 +293,10 @@ impl SearchService {
     }
 
     /// 查找上一个匹配项（使用配置）
+    /// 还是使用text_cache,要不反复扫太慢了
     pub fn find_prev(&self, current_line: usize, config: SearchConfig) -> Option<SearchMatch> {
         // 获取当前行之前的所有结果
+        println!("[debug] {}", current_line);
         let mut search_config = config;
         search_config.line_end = Some(current_line);  // 只搜索当前行之前
         search_config.max_results = usize::MAX;  // 获取所有结果以便找到最后一个
@@ -308,3 +310,4 @@ impl SearchService {
             .last()
     }
 }
+
