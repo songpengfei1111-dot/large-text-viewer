@@ -121,7 +121,6 @@ impl TaintEngine {
     }
 
     fn _trace_backward(&mut self, line_num: usize, target: &str, depth: usize) -> Option<TracePath> {
-        // 优化：提前检查深度和访问状态
         if depth >= self.max_depth { return None;}
 
         self.visited.insert(line_num);
@@ -135,7 +134,6 @@ impl TaintEngine {
             trace_type: TraceType::Unknown,
             depth,
             sources: vec![],
-
         };
 
         // 使用 InsnAnalyzer 识别指令类型
