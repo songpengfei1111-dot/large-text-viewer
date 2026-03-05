@@ -121,7 +121,7 @@ impl TaintEngine {
     }
 
     fn _trace_backward(&mut self, line_num: usize, target: &str, depth: usize) -> Option<TracePath> {
-        if depth >= self.max_depth { return None;}
+        if depth >= self.max_depth { return None; }
 
         self.visited.insert(line_num);
 
@@ -141,52 +141,47 @@ impl TaintEngine {
 
         match insn_type {
             InsnType::Load => {
-                // 处理内存读取 (ld)
                 if let Ok((dst_regs, addr, size)) = InsnAnalyzer::parse_load_insn(&line_text) {
                     self.debug_log(&format!("  [Load] 目标寄存器: {:?}, target={}, byte_range={:?}", 
                                  dst_regs, target, self.current_byte_range));
                     
-                    let (adjusted_addr, adjusted_size, _target_reg_for_trace) = 
+                    let (adjusted_addr, adjusted_size) = 
                         self.calculate_adjusted_address(&dst_regs, addr, size, target);
                     
                     path.trace_type = TraceType::MemToReg(format!("0x{:x}", adjusted_addr));
-                    path.sources = self.trace_mem_read(line_num, adjusted_addr, adjusted_size, &dst_regs, depth)
-                        .into_iter().collect();
+                    path.sources.extend(
+                        self.trace_mem_read(line_num, adjusted_addr, adjusted_size, &dst_regs, depth)
+                    );
                 }
             }
             InsnType::Store => {
-                // 处理内存写入 (st)
                 if let Ok((src_regs, addr, size)) = InsnAnalyzer::parse_store_insn(&line_text) {
                     path.trace_type = TraceType::RegToMem(src_regs.join(","));
-                    path.sources = self.trace_mem_write(line_num, &src_regs, addr, size, depth)
-                        .into_iter().collect();
+                    path.sources.extend(
+                        self.trace_mem_write(line_num, &src_regs, addr, size, depth)
+                    );
                 }
             }
             InsnType::Move | InsnType::Branch => {
-                // 处理寄存器传递 (mov) 和分支指令
                 let values = InsnAnalyzer::extract_reg_values(&line_text, PREFIX_REG_READ);
                 if let Some((src_reg, value)) = values.first() {
                     path.trace_type = TraceType::RegToReg(src_reg.clone());
-                    path.sources = self.trace_reg_transfer(line_num, src_reg, value, depth)
-                        .into_iter().collect();
+                    path.sources.extend(
+                        self.trace_reg_transfer(line_num, src_reg, value, depth)
+                    );
                 }
             }
             InsnType::Arith | InsnType::Logic => {
-                // 处理算术/逻辑运算
                 println!("[AlgOp]");
-                let src_regs: Vec<String> = line_text.split(SEP)
-                    .find(|p| p.starts_with(PREFIX_REG_READ))
-                    .and_then(|part| part.strip_prefix(PREFIX_REG_READ))
-                    .map(|s| s.split('_')
-                        .filter(|pair| pair.contains('='))
-                        .map(String::from)
-                        .collect())
-                    .unwrap_or_default();
-                path.trace_type = TraceType::Arith(src_regs.iter().map(|s| s.to_string()).collect());
+                let reg_values = InsnAnalyzer::extract_reg_values(&line_text, PREFIX_REG_READ);
+                let src_regs: Vec<String> = reg_values.iter()
+                    .map(|(reg, val)| format!("{}={}", reg, val))
+                    .collect();
+                
+                path.trace_type = TraceType::Arith(reg_values.iter().map(|(r, _)| r.clone()).collect());
                 path.sources = self.trace_arith_operation(line_num, src_regs, depth);
             }
             InsnType::Unknown => {
-                // 终点/常量
                 println!("终点/常量");
                 path.trace_type = TraceType::Constant;
             }
@@ -201,9 +196,9 @@ impl TaintEngine {
         addr: u64,
         size: usize,
         target: &str,
-    ) -> (u64, usize, String) {
+    ) -> (u64, usize) {
         if dst_regs.is_empty() {
-            return (addr, size, target.to_string());
+            return (addr, size);
         }
 
         // 情况1: 有字节偏移上下文
@@ -214,7 +209,7 @@ impl TaintEngine {
                 let new_addr = addr + mem_offset as u64 + *byte_offset as u64;
                 println!("  [字节追踪] 寄存器 {} 在位置 {}, 调整搜索: 0x{:x}[{}] -> 0x{:x}[{}]",
                          target_reg, reg_index, addr, size, new_addr, *byte_size);
-                return (new_addr, *byte_size, target_reg.clone());
+                return (new_addr, *byte_size);
             }
         }
 
@@ -226,11 +221,11 @@ impl TaintEngine {
                 let new_addr = addr + mem_offset as u64;
                 println!("  [多寄存器] 寄存器 {} 在位置 {}, 调整搜索: 0x{:x}[{}] -> 0x{:x}[{}]",
                          target, reg_index, addr, size, new_addr, reg_size);
-                return (new_addr, reg_size, target.to_string());
+                return (new_addr, reg_size);
             }
         }
 
-        (addr, size, target.to_string())
+        (addr, size)
     }
 
     /// 验证 store 指令的值是否匹配（仅在寄存器类型相同时校验）
@@ -242,64 +237,58 @@ impl TaintEngine {
         src_regs: &[String],
         write_offset: usize,
     ) -> bool {
-        // 从 Load 指令中提取期望值
+        // 获取 Load 指令文本
         let load_line_text = match self.service.get_line_text(load_line_num) {
             Some(text) => text,
             None => return true, // 无法获取，跳过校验
         };
         
-        let write_values = InsnAnalyzer::extract_reg_values(&load_line_text, PREFIX_REG_WRITE);
+        // 确定目标寄存器
+        let target_reg = self.current_byte_range.as_ref()
+            .map(|(reg, _, _)| reg.clone())
+            .or_else(|| dst_regs.first().cloned())
+            .unwrap_or_default();
         
-        // 查找目标寄存器的写入值
-        let target_reg = if let Some((reg, _, _)) = &self.current_byte_range {
-            reg.clone()
-        } else if !dst_regs.is_empty() {
-            dst_regs[0].clone()
-        } else {
+        if target_reg.is_empty() {
             return true; // 无目标寄存器，跳过校验
-        };
+        }
         
+        // 提取期望值
+        let write_values = InsnAnalyzer::extract_reg_values(&load_line_text, PREFIX_REG_WRITE);
         let expected_value = match write_values.iter().find(|(reg, _)| reg == &target_reg) {
-            Some((_, val)) => val.clone(),
+            Some((_, val)) => val,
             None => return true, // 无期望值，跳过校验
         };
         
-        // 从 Store 指令中提取实际写入的值
-        let actual_values = InsnAnalyzer::extract_reg_values(store_line_text, PREFIX_REG_READ);
-        
         // 找到对应偏移位置的源寄存器
         let src_reg_index = (write_offset / 8).min(src_regs.len().saturating_sub(1));
-        if src_reg_index >= src_regs.len() {
-            return true; // 索引越界，跳过校验
-        }
-        
-        let src_reg = &src_regs[src_reg_index];
+        let src_reg = match src_regs.get(src_reg_index) {
+            Some(reg) => reg,
+            None => return true, // 索引越界，跳过校验
+        };
         
         // 检查寄存器类型是否相同（通过首字母判断）
-        let target_reg_type = target_reg.chars().next();
-        let src_reg_type = src_reg.chars().next();
-        
-        // 只在寄存器类型相同时进行值校验
-        if target_reg_type != src_reg_type {
+        if target_reg.chars().next() != src_reg.chars().next() {
             println!("  ℹ 寄存器类型不同 ({:?} vs {:?})，跳过值校验", 
-                     target_reg_type, src_reg_type);
+                     target_reg.chars().next(), src_reg.chars().next());
             return true;
         }
         
-        // 检查该寄存器的值是否匹配
-        if let Some((_, actual_val)) = actual_values.iter().find(|(r, _)| r == src_reg) {
-            if actual_val != &expected_value {
+        // 提取实际值并校验
+        let actual_values = InsnAnalyzer::extract_reg_values(store_line_text, PREFIX_REG_READ);
+        match actual_values.iter().find(|(r, _)| r == src_reg) {
+            Some((_, actual_val)) if actual_val != expected_value => {
                 println!("  ⚠ 值不匹配: 期望 {}, 实际 {} (寄存器 {})", 
                          expected_value, actual_val, src_reg);
                 println!("  → 继续搜索其他候选...");
-                return false;
-            } else {
-                println!("  ✓ 值校验通过: {} = {}", src_reg, actual_val);
-                return true;
+                false
             }
+            Some(_) => {
+                println!("  ✓ 值校验通过: {} = {}", src_reg, expected_value);
+                true
+            }
+            None => true, // 无法找到实际值，跳过校验
         }
-        
-        true // 无法找到实际值，跳过校验
     }
 
     /// 追踪源寄存器（处理字节偏移上下文）
@@ -423,34 +412,23 @@ impl TaintEngine {
 
     // 追踪内存写入（使用 InsnAnalyzer 和 ShadowMemory）
     fn trace_mem_write(&mut self, line_num: usize, src_regs: &[String], _addr: u64, _size: usize, depth: usize) -> Option<TracePath> {
-        if src_regs.is_empty() {
-            return None;
-        }
-
-        // 取第一个源寄存器进行追踪
-        let src_reg = &src_regs[0];
-        
-        // 从指令中提取寄存器值
+        let src_reg = src_regs.first()?;
         let line_text = self.service.get_line_text(line_num)?;
         let reg_values = InsnAnalyzer::extract_reg_values(&line_text, PREFIX_REG_READ);
         
-        if let Some((_, value)) = reg_values.iter().find(|(r, _)| r == src_reg) {
-            
-            // 生成搜索 pattern
-            let search_pattern = InsnAnalyzer::gen_reg_write_pattern(src_reg, value);
-            println!("[regW] {}", search_pattern.pattern);
-            
-            let config = SearchConfig::new(search_pattern.pattern).with_regex(search_pattern.is_regex);
-            
-            return self.find_and_trace(line_num, &config, src_reg, depth);
-        }
-        
-        None
+        reg_values.iter()
+            .find(|(r, _)| r == src_reg)
+            .and_then(|(_, value)| {
+                let search_pattern = InsnAnalyzer::gen_reg_write_pattern(src_reg, value);
+                println!("[regW] {}", search_pattern.pattern);
+                
+                let config = SearchConfig::new(search_pattern.pattern).with_regex(search_pattern.is_regex);
+                self.find_and_trace(line_num, &config, src_reg, depth)
+            })
     }
 
     // 追踪寄存器传递,从rr__到rw__（使用 InsnAnalyzer）
     fn trace_reg_transfer(&mut self, line_num: usize, reg: &str, _value: &str, depth: usize) -> Option<TracePath> {
-        // 检查是否是零寄存器（常量）
         if InsnAnalyzer::is_zero_register(reg) {
             println!("终点: 零寄存器 {}", reg);
             return None;
@@ -460,14 +438,11 @@ impl TaintEngine {
         println!("[reg2reg]: {}", search_pattern.pattern);
         
         let config = SearchConfig::new(search_pattern.pattern).with_regex(search_pattern.is_regex);
-
         self.find_and_trace(line_num, &config, reg, depth)
     }
 
     // 追踪算术运算（使用 InsnAnalyzer）
     fn trace_arith_operation(&mut self, line_num: usize, regs: Vec<String>, depth: usize) -> Vec<TracePath> {
-        let mut sources = Vec::new();
-        
         // 解析寄存器值对
         let reg_values: Vec<(String, String)> = regs.iter()
             .filter_map(|pair| {
@@ -479,38 +454,32 @@ impl TaintEngine {
         // 生成搜索 patterns
         let patterns = InsnAnalyzer::gen_arith_patterns(&reg_values);
         
-        for (pattern, (reg, val)) in patterns.iter().zip(reg_values.iter()) {
-            // 跳过零寄存器和立即数
-            if InsnAnalyzer::is_zero_register(reg) {
-                println!("[arith] 跳过零寄存器: {}", reg);
-                continue;
-            }
-
-            if InsnAnalyzer::is_constant_value(val) {
-                println!("[arith] 跳过常量值: {}", val);
-                continue;
-            }
-
-            println!("[arith] {}", pattern.pattern);
-            let config = SearchConfig::new(pattern.pattern.clone()).with_regex(pattern.is_regex);
-
-            if let Some(prev) = self.service.find_prev(line_num, config) {
-                println!("\t{}: {}", prev.line_number + 1,
-                         self.service.get_line_text(prev.line_number).unwrap_or_default());
-
-                if let Some(source) = self._trace_backward(prev.line_number, reg, depth + 1) {
-                    sources.push(source);
-                }
-            }
-        }
-        sources
+        reg_values.iter()
+            .zip(patterns.iter())
+            .filter(|((reg, val), _)| {
+                // 跳过零寄存器和常量值
+                !InsnAnalyzer::is_zero_register(reg) && !InsnAnalyzer::is_constant_value(val)
+            })
+            .filter_map(|((reg, _), pattern)| {
+                println!("[arith] {}", pattern.pattern);
+                let config = SearchConfig::new(pattern.pattern.clone()).with_regex(pattern.is_regex);
+                
+                self.service.find_prev(line_num, config)
+                    .and_then(|prev| {
+                        println!("\t{}: {}", prev.line_number + 1,
+                                 self.service.get_line_text(prev.line_number).unwrap_or_default());
+                        self._trace_backward(prev.line_number, reg, depth + 1)
+                    })
+            })
+            .collect()
     }
 
     // 通用查找并追踪（通用执行函数）
     fn find_and_trace(&mut self, line_num: usize, config: &SearchConfig, target: &str, depth: usize) -> Option<TracePath> {
         self.service.find_prev(line_num, config.clone())
             .and_then(|prev| {
-                println!("\t{}: {}", prev.line_number + 1, self.service.get_line_text(prev.line_number).unwrap_or_default());
+                println!("\t{}: {}", prev.line_number + 1, 
+                         self.service.get_line_text(prev.line_number).unwrap_or_default());
                 self._trace_backward(prev.line_number, target, depth + 1)
             })
             .or_else(|| {
