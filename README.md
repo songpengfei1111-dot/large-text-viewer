@@ -1,4 +1,4 @@
-项目架构 fork 自acejarvis/large-text-viewer，感谢大佬的工作，记得给大佬点个star🌟
+项目架构 fork 自acejarvis/large-text-viewer 并进行了性能和功能上的深度改造，感谢大佬的工作，记得给大佬点个star🌟
 
 main 分支继续维护gui代码
 
