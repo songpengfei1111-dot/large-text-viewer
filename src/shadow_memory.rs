@@ -61,15 +61,20 @@ impl ShadowMemory {
     /// byte_offset: 从寄存器的第几个字节开始
     /// size: 标记多少个字节
     pub fn taint_register(&mut self, reg: &str, byte_offset: usize, size: usize, tag: TaintTag) {
-        let reg_size = Self::get_reg_size(reg);
-        let tags = self.reg_tags.entry(reg.to_string())
-            .or_insert_with(|| vec![None; reg_size]);
+        let tags = self.get_or_create_reg_tags(reg);
         
         for i in 0..size {
             if byte_offset + i < tags.len() {
                 tags[byte_offset + i] = Some(tag);
             }
         }
+    }
+
+    /// 获取或创建寄存器的污点标签数组
+    fn get_or_create_reg_tags(&mut self, reg: &str) -> &mut Vec<Option<TaintTag>> {
+        let reg_size = Self::get_reg_size(reg);
+        self.reg_tags.entry(reg.to_string())
+            .or_insert_with(|| vec![None; reg_size])
     }
 
     /// 获取寄存器污点（返回每个字节的污点标签）
@@ -81,8 +86,7 @@ impl ShadowMemory {
 
     /// 清除寄存器污点
     pub fn clear_register(&mut self, reg: &str) {
-        let reg_size = Self::get_reg_size(reg);
-        self.reg_tags.insert(reg.to_string(), vec![None; reg_size]);
+        *self.get_or_create_reg_tags(reg) = vec![None; Self::get_reg_size(reg)];
     }
 
     /// 检查寄存器是否被污染
@@ -117,84 +121,78 @@ impl ShadowMemory {
         }
 
         match reg.chars().next() {
-            Some('x') => {
-                // x0 写入时，同步到 w0 的低32位
-                if let Some(num) = reg.strip_prefix('x') {
-                    let w_reg = format!("w{}", num);
-                    if let Some(x_tags) = self.reg_tags.get(reg).cloned() {
-                        let w_tags: Vec<_> = x_tags.iter().take(4).copied().collect();
-                        self.reg_tags.insert(w_reg, w_tags);
-                    }
-                }
-            }
-            Some('w') => {
-                // w0 写入时，只影响 x0 的低32位，高32位保持不变
-                if let Some(num) = reg.strip_prefix('w') {
-                    let x_reg = format!("x{}", num);
-                    if let Some(w_tags) = self.reg_tags.get(reg).cloned() {
-                        let x_tags = self.reg_tags.entry(x_reg)
-                            .or_insert_with(|| vec![None; 8]);
-                        for i in 0..4.min(w_tags.len()) {
-                            x_tags[i] = w_tags[i];
-                        }
-                    }
-                }
-            }
-            Some('q') => {
-                // SIMD 寄存器 q0 包含 d0(低64位)
-                if let Some(num) = reg.strip_prefix('q') {
-                    let d_reg = format!("d{}", num);
-                    let s_reg = format!("s{}", num);
-                    if let Some(q_tags) = self.reg_tags.get(reg).cloned() {
-                        // d0 = q0 的低 64 位
-                        let d_tags: Vec<_> = q_tags.iter().take(8).copied().collect();
-                        self.reg_tags.insert(d_reg, d_tags);
-                        // s0 = q0 的低 32 位
-                        let s_tags: Vec<_> = q_tags.iter().take(4).copied().collect();
-                        self.reg_tags.insert(s_reg, s_tags);
-                    }
-                }
-            }
-            Some('d') => {
-                // d0 写入时，影响 q0 的低64位和 s0
-                if let Some(num) = reg.strip_prefix('d') {
-                    let q_reg = format!("q{}", num);
-                    let s_reg = format!("s{}", num);
-                    if let Some(d_tags) = self.reg_tags.get(reg).cloned() {
-                        // 更新 q0 的低64位
-                        let q_tags = self.reg_tags.entry(q_reg)
-                            .or_insert_with(|| vec![None; 16]);
-                        for i in 0..8.min(d_tags.len()) {
-                            q_tags[i] = d_tags[i];
-                        }
-                        // 更新 s0
-                        let s_tags: Vec<_> = d_tags.iter().take(4).copied().collect();
-                        self.reg_tags.insert(s_reg, s_tags);
-                    }
-                }
-            }
-            Some('s') => {
-                // s0 写入时，影响 d0 和 q0 的低32位
-                if let Some(num) = reg.strip_prefix('s') {
-                    let d_reg = format!("d{}", num);
-                    let q_reg = format!("q{}", num);
-                    if let Some(s_tags) = self.reg_tags.get(reg).cloned() {
-                        // 更新 d0 的低32位
-                        let d_tags = self.reg_tags.entry(d_reg)
-                            .or_insert_with(|| vec![None; 8]);
-                        for i in 0..4.min(s_tags.len()) {
-                            d_tags[i] = s_tags[i];
-                        }
-                        // 更新 q0 的低32位
-                        let q_tags = self.reg_tags.entry(q_reg)
-                            .or_insert_with(|| vec![None; 16]);
-                        for i in 0..4.min(s_tags.len()) {
-                            q_tags[i] = s_tags[i];
-                        }
-                    }
-                }
-            }
+            Some('x') => self.sync_x_to_w(reg),
+            Some('w') => self.sync_w_to_x(reg),
+            Some('q') => self.sync_q_to_lower(reg),
+            Some('d') => self.sync_d_to_others(reg),
+            Some('s') => self.sync_s_to_others(reg),
             _ => {}
+        }
+    }
+
+    fn sync_x_to_w(&mut self, x_reg: &str) {
+        if let Some(num) = x_reg.strip_prefix('x') {
+            let w_reg = format!("w{}", num);
+            if let Some(x_tags) = self.reg_tags.get(x_reg).cloned() {
+                let w_tags: Vec<_> = x_tags.iter().take(4).copied().collect();
+                self.reg_tags.insert(w_reg, w_tags);
+            }
+        }
+    }
+
+    fn sync_w_to_x(&mut self, w_reg: &str) {
+        if let Some(num) = w_reg.strip_prefix('w') {
+            let x_reg = format!("x{}", num);
+            if let Some(w_tags) = self.reg_tags.get(w_reg).cloned() {
+                let x_tags = self.get_or_create_reg_tags(&x_reg);
+                for i in 0..4.min(w_tags.len()) {
+                    x_tags[i] = w_tags[i];
+                }
+            }
+        }
+    }
+
+    fn sync_q_to_lower(&mut self, q_reg: &str) {
+        if let Some(num) = q_reg.strip_prefix('q') {
+            if let Some(q_tags) = self.reg_tags.get(q_reg).cloned() {
+                let d_reg = format!("d{}", num);
+                let s_reg = format!("s{}", num);
+                self.reg_tags.insert(d_reg, q_tags.iter().take(8).copied().collect());
+                self.reg_tags.insert(s_reg, q_tags.iter().take(4).copied().collect());
+            }
+        }
+    }
+
+    fn sync_d_to_others(&mut self, d_reg: &str) {
+        if let Some(num) = d_reg.strip_prefix('d') {
+            if let Some(d_tags) = self.reg_tags.get(d_reg).cloned() {
+                let q_reg = format!("q{}", num);
+                let q_tags = self.get_or_create_reg_tags(&q_reg);
+                for i in 0..8.min(d_tags.len()) {
+                    q_tags[i] = d_tags[i];
+                }
+                
+                let s_reg = format!("s{}", num);
+                self.reg_tags.insert(s_reg, d_tags.iter().take(4).copied().collect());
+            }
+        }
+    }
+
+    fn sync_s_to_others(&mut self, s_reg: &str) {
+        if let Some(num) = s_reg.strip_prefix('s') {
+            if let Some(s_tags) = self.reg_tags.get(s_reg).cloned() {
+                let d_reg = format!("d{}", num);
+                let d_tags = self.get_or_create_reg_tags(&d_reg);
+                for i in 0..4.min(s_tags.len()) {
+                    d_tags[i] = s_tags[i];
+                }
+                
+                let q_reg = format!("q{}", num);
+                let q_tags = self.get_or_create_reg_tags(&q_reg);
+                for i in 0..4.min(s_tags.len()) {
+                    q_tags[i] = s_tags[i];
+                }
+            }
         }
     }
 

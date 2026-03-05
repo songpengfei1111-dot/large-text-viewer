@@ -1,13 +1,9 @@
-mod test_reg;
-
 mod cli_core;
 mod taint_engine;
 mod search_service;
 mod shadow_memory;    // 新增
 mod insn_analyzer;    // 新增
-mod taint_demo;       // 新增
 
-mod insn_il;
 // use std::env;
 // fn main() -> eframe::Result<()> {
     // 检查是否有命令行参数

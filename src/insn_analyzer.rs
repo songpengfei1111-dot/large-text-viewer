@@ -135,24 +135,19 @@ impl InsnAnalyzer {
 
     /// 提取读取的寄存器 (rr__ 字段)
     pub fn extract_read_regs(line_text: &str) -> Vec<String> {
-        line_text.split(SEP)
-            .find(|p| p.starts_with("rr__"))
-            .and_then(|part| part.strip_prefix("rr__"))
-            .map(|s| {
-                s.split('_')
-                    .filter(|pair| pair.contains('='))
-                    .filter_map(|pair| pair.split_once('='))
-                    .map(|(reg, _val)| reg.to_string())
-                    .collect()
-            })
-            .unwrap_or_default()
+        Self::extract_regs_by_prefix(line_text, "rr__")
     }
 
     /// 提取写入的寄存器 (rw__ 字段)
     pub fn extract_write_regs(line_text: &str) -> Vec<String> {
+        Self::extract_regs_by_prefix(line_text, "rw__")
+    }
+
+    /// 通用的寄存器提取方法
+    fn extract_regs_by_prefix(line_text: &str, prefix: &str) -> Vec<String> {
         line_text.split(SEP)
-            .find(|p| p.starts_with("rw__"))
-            .and_then(|part| part.strip_prefix("rw__"))
+            .find(|p| p.starts_with(prefix))
+            .and_then(|part| part.strip_prefix(prefix))
             .map(|s| {
                 s.split('_')
                     .filter(|pair| pair.contains('='))
@@ -192,6 +187,7 @@ impl InsnAnalyzer {
     /// - 优先级3: st__6cf0158690_16 (0x90+16=0xa0，刚好覆盖)
     /// - 优先级4: st__6cf0158698_16 (0x98+16>0xa0，覆盖)
     /// - 优先级5: st__6cf0158690_* (0x90开始的任意大小，可能覆盖)
+    /// TODO 根据策略调整这里的优先级，双寄存器的情况下要转移
     pub fn gen_mem_read_patterns(addr: u64, size: usize) -> Vec<SearchPattern> {
         let mut patterns = Vec::new();
         
@@ -256,7 +252,7 @@ impl InsnAnalyzer {
             description: format!("查找写入内存地址 0x{:x} 的指令", addr),
         }
     }
-    
+
     /// 检查内存访问是否重叠
     /// read_addr: 读取的起始地址
     /// read_size: 读取的字节数
@@ -264,24 +260,24 @@ impl InsnAnalyzer {
     /// write_size: 写入的字节数
     /// 返回: (是否重叠, 写入偏移, 重叠字节数)
     pub fn check_memory_overlap(
-        read_addr: u64, 
+        read_addr: u64,
         read_size: usize,
         write_addr: u64,
         write_size: usize
     ) -> Option<(usize, usize)> {
         let read_end = read_addr + read_size as u64;
         let write_end = write_addr + write_size as u64;
-        
+
         // 检查是否有重叠
         if write_addr < read_end && read_addr < write_end {
             // 计算重叠区域
             let overlap_start = read_addr.max(write_addr);
             let overlap_end = read_end.min(write_end);
-            
+
             // 计算在写入范围内的偏移
             let offset_in_write = (overlap_start - write_addr) as usize;
             let overlap_size = (overlap_end - overlap_start) as usize;
-            
+
             Some((offset_in_write, overlap_size))
         } else {
             None
@@ -457,7 +453,7 @@ mod tests {
         assert!(!InsnAnalyzer::is_aligned(0x104, 8));
         assert!(!InsnAnalyzer::is_aligned(0x108, 16));
     }
-    
+
     #[test]
     fn test_memory_overlap() {
         // 场景1: ldr w8, [0x6cf01586a0] (4字节) vs str q0, [0x6cf01586a0] (16字节)
@@ -467,7 +463,7 @@ mod tests {
             0x6cf01586a0, 16  // write
         );
         assert_eq!(result, Some((0, 4))); // write[0:4] -> read[0:4]
-        
+
         // 场景2: ldr x21, [0x6cf01586a8] (8字节) vs str q0, [0x6cf01586a0] (16字节)
         // 部分覆盖
         let result = InsnAnalyzer::check_memory_overlap(
@@ -475,7 +471,7 @@ mod tests {
             0x6cf01586a0, 16  // write: 0xa0-0xaf
         );
         assert_eq!(result, Some((8, 8))); // write[8:16] -> read[0:8]
-        
+
         // 场景3: ldr w8, [0x6cf01586b0] (4字节) vs str q0, [0x6cf01586a0] (16字节)
         // 不重叠
         let result = InsnAnalyzer::check_memory_overlap(
@@ -483,7 +479,7 @@ mod tests {
             0x6cf01586a0, 16  // write: 0xa0-0xaf
         );
         assert_eq!(result, None);
-        
+
         // 场景4: ldr x0, [0x6cf01586a4] (8字节) vs str q0, [0x6cf01586a0] (16字节)
         // 部分覆盖（跨中间）
         let result = InsnAnalyzer::check_memory_overlap(

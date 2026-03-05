@@ -142,68 +142,8 @@ impl TaintEngine {
                                  dst_regs, target, self.current_byte_range);
                     }
                     
-                    // 检查是否需要调整搜索地址（多寄存器或字节偏移）
-                    let (adjusted_addr, adjusted_size, target_reg_for_trace) = if !dst_regs.is_empty() {
-                        // 情况1: 有字节偏移上下文（从上一层传递下来）
-                        if let Some((target_reg, byte_offset, byte_size)) = &self.current_byte_range {
-                            // 检查 byte_range 中的寄存器是否在当前指令的目标寄存器列表中
-                            if let Some(reg_index) = dst_regs.iter().position(|r| r == target_reg) {
-                                // 计算该寄存器对应的内存偏移
-                                // 例如: ldp x9, x8, [x21] - x9在偏移0，x8在偏移8
-                                let reg_size = InsnAnalyzer::get_reg_size(target_reg);
-                                let mem_offset = reg_index * reg_size;
-                                
-                                // 结合字节偏移上下文
-                                let new_addr = addr + mem_offset as u64 + *byte_offset as u64;
-                                let new_size = *byte_size;
-                                println!("  [字节追踪] 寄存器 {} 在位置 {}, 调整搜索: 0x{:x}[{}] -> 0x{:x}[{}]", 
-                                         target_reg, reg_index, addr, size, new_addr, new_size);
-                                (new_addr, new_size, target_reg.clone())
-                            } else {
-                                // byte_range 中的寄存器不在当前指令中，说明寄存器类型变了
-                                // 清除 byte_range，使用 target 参数
-                                println!("  [字节追踪] byte_range 寄存器 {} 不在目标列表中，切换到 target={}", 
-                                         target_reg, target);
-                                
-                                // 检查是否是多寄存器指令
-                                if dst_regs.len() > 1 {
-                                    if let Some(reg_index) = dst_regs.iter().position(|r| r == target) {
-                                        let reg_size = InsnAnalyzer::get_reg_size(target);
-                                        let mem_offset = reg_index * reg_size;
-                                        let new_addr = addr + mem_offset as u64;
-                                        let new_size = reg_size;
-                                        println!("  [多寄存器] 寄存器 {} 在位置 {}, 调整搜索: 0x{:x}[{}] -> 0x{:x}[{}]", 
-                                                 target, reg_index, addr, size, new_addr, new_size);
-                                        (new_addr, new_size, target.to_string())
-                                    } else {
-                                        (addr, size, target.to_string())
-                                    }
-                                } else {
-                                    (addr, size, target.to_string())
-                                }
-                            }
-                        }
-                        // 情况2: 没有字节偏移上下文，但是多寄存器指令
-                        // 需要根据 target 参数判断追踪哪个寄存器
-                        else if dst_regs.len() > 1 {
-                            // 查找 target 在寄存器列表中的位置
-                            if let Some(reg_index) = dst_regs.iter().position(|r| r == target) {
-                                let reg_size = InsnAnalyzer::get_reg_size(target);
-                                let mem_offset = reg_index * reg_size;
-                                let new_addr = addr + mem_offset as u64;
-                                let new_size = reg_size;
-                                println!("  [多寄存器] 寄存器 {} 在位置 {}, 调整搜索: 0x{:x}[{}] -> 0x{:x}[{}]", 
-                                         target, reg_index, addr, size, new_addr, new_size);
-                                (new_addr, new_size, target.to_string())
-                            } else {
-                                (addr, size, target.to_string())
-                            }
-                        } else {
-                            (addr, size, target.to_string())
-                        }
-                    } else {
-                        (addr, size, target.to_string())
-                    };
+                    let (adjusted_addr, adjusted_size, target_reg_for_trace) = 
+                        self.calculate_adjusted_address(&dst_regs, addr, size, target);
                     
                     path.trace_type = TraceType::MemToReg(format!("0x{:x}", adjusted_addr));
                     path.sources = self.trace_mem_read(line_num, adjusted_addr, adjusted_size, &dst_regs, depth)
@@ -218,28 +158,28 @@ impl TaintEngine {
                         .into_iter().collect();
                 }
             }
-            InsnType::Move => {
-                // 处理寄存器传递 (mov)
-                if let Some((src_reg, value)) = self.extract_reg_value(&line_text) {
+            InsnType::Move | InsnType::Branch => {
+                // 处理寄存器传递 (mov) 和分支指令
+                let values = InsnAnalyzer::extract_reg_values(&line_text, "rr__");
+                if let Some((src_reg, value)) = values.first() {
                     path.trace_type = TraceType::RegToReg(src_reg.clone());
-                    path.sources = self.trace_reg_transfer(line_num, &src_reg, &value, depth)
+                    path.sources = self.trace_reg_transfer(line_num, src_reg, value, depth)
                         .into_iter().collect();
                 }
             }
             InsnType::Arith | InsnType::Logic => {
                 // 处理算术/逻辑运算
                 println!("[AlgOp]");
-                let src_regs = self.extract_reg_pairs(&line_text);
+                let src_regs: Vec<String> = line_text.split(SEP)
+                    .find(|p| p.starts_with("rr__"))
+                    .and_then(|part| part.strip_prefix("rr__"))
+                    .map(|s| s.split('_')
+                        .filter(|pair| pair.contains('='))
+                        .map(String::from)
+                        .collect())
+                    .unwrap_or_default();
                 path.trace_type = TraceType::Arith(src_regs.iter().map(|s| s.to_string()).collect());
                 path.sources = self.trace_arith_operation(line_num, src_regs, depth);
-            }
-            InsnType::Branch => {
-                // 分支指令，追踪条件寄存器
-                if let Some((src_reg, value)) = self.extract_reg_value(&line_text) {
-                    path.trace_type = TraceType::RegToReg(src_reg.clone());
-                    path.sources = self.trace_reg_transfer(line_num, &src_reg, &value, depth)
-                        .into_iter().collect();
-                }
             }
             InsnType::Unknown => {
                 // 终点/常量
@@ -250,6 +190,46 @@ impl TaintEngine {
 
         Some(path)
     }
+    /// 计算调整后的内存地址和大小（处理多寄存器和字节偏移）
+    fn calculate_adjusted_address(
+        &self,
+        dst_regs: &[String],
+        addr: u64,
+        size: usize,
+        target: &str,
+    ) -> (u64, usize, String) {
+        if dst_regs.is_empty() {
+            return (addr, size, target.to_string());
+        }
+
+        // 情况1: 有字节偏移上下文
+        if let Some((target_reg, byte_offset, byte_size)) = &self.current_byte_range {
+            if let Some(reg_index) = dst_regs.iter().position(|r| r == target_reg) {
+                let reg_size = InsnAnalyzer::get_reg_size(target_reg);
+                let mem_offset = reg_index * reg_size;
+                let new_addr = addr + mem_offset as u64 + *byte_offset as u64;
+                println!("  [字节追踪] 寄存器 {} 在位置 {}, 调整搜索: 0x{:x}[{}] -> 0x{:x}[{}]",
+                         target_reg, reg_index, addr, size, new_addr, *byte_size);
+                return (new_addr, *byte_size, target_reg.clone());
+            }
+        }
+
+        // 情况2: 多寄存器指令
+        if dst_regs.len() > 1 {
+            if let Some(reg_index) = dst_regs.iter().position(|r| r == target) {
+                let reg_size = InsnAnalyzer::get_reg_size(target);
+                let mem_offset = reg_index * reg_size;
+                let new_addr = addr + mem_offset as u64;
+                println!("  [多寄存器] 寄存器 {} 在位置 {}, 调整搜索: 0x{:x}[{}] -> 0x{:x}[{}]",
+                         target, reg_index, addr, size, new_addr, reg_size);
+                return (new_addr, reg_size, target.to_string());
+            }
+        }
+
+        (addr, size, target.to_string())
+    }
+
+
 
     // 辅助方法：提取寄存器和值（保留用于兼容性）
     fn extract_reg_value(&self, line_text: &str) -> Option<(String, String)> {
@@ -257,19 +237,6 @@ impl TaintEngine {
         values.first().cloned()
     }
 
-    // 辅助方法：提取所有源寄存器对（保留用于兼容性）
-    fn extract_reg_pairs(&self, line_text: &str) -> Vec<String> {
-        line_text.split(SEP)
-            .find(|p| p.starts_with("rr__"))
-            .and_then(|part| part.strip_prefix("rr__"))
-            .map(|s| {
-                s.split('_')
-                    .filter(|pair| pair.contains('='))
-                    .map(String::from)
-                    .collect()
-            })
-            .unwrap_or_default()
-    }
 
     // 追踪内存读取（使用启发式搜索策略）
     fn trace_mem_read(&mut self, line_num: usize, addr: u64, size: usize, dst_regs: &[String], depth: usize) -> Option<TracePath> {

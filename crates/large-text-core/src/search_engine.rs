@@ -194,8 +194,8 @@ impl SearchEngine {
         });
     }
 
-    // 短时间多次小范围搜索，用thread反而变慢了
-    //获取实际匹配位置
+    // 短时间多次小范围搜索，用thread反而变慢了，需要手动给出配置
+    // 获取实际匹配位置
     pub fn fetch_matches(&self, reader: Arc<FileReader>, tx: SyncSender<SearchMessage>,
                          start_offset: usize, max_results: usize, cancel_token: Arc<AtomicBool>,
     ) {
