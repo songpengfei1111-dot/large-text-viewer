@@ -1,8 +1,8 @@
 // taint_engine.rs
 use crate::search_service::{SearchService, SearchConfig};
-use crate::insn_analyzer::{InsnAnalyzer, InsnType};
+use crate::insn_analyzer::{InsnAnalyzer, InsnType, ParsedInsn};
 use anyhow::Result;
-use std::collections::HashSet;
+use std::collections::{HashSet, HashMap};
 
 const SEP: &str = ";";
 
@@ -18,6 +18,8 @@ pub struct TaintEngine {
     // 字节偏移追踪上下文：记录当前追踪目标的字节范围
     // key: target_name (寄存器名), value: (byte_offset, byte_size)
     current_byte_range: Option<(String, usize, usize)>,
+    // 解析缓存：避免重复解析同一行
+    parse_cache: HashMap<usize, ParsedInsn>,
 }
 
 #[derive(Debug, Clone)]
@@ -93,6 +95,7 @@ impl TaintEngine {
             visited: HashSet::new(),
             debug: false,  // 默认关闭调试
             current_byte_range: None,
+            parse_cache: HashMap::new(),
         }
     }
 
@@ -112,9 +115,27 @@ impl TaintEngine {
             println!("{}", msg);
         }
     }
+    
+    /// 获取解析后的指令（带缓存）
+    fn get_parsed_insn(&mut self, line_num: usize) -> Option<ParsedInsn> {
+        // 检查缓存
+        if let Some(cached) = self.parse_cache.get(&line_num) {
+            return Some(cached.clone());
+        }
+        
+        // 获取文本并解析
+        let line_text = self.service.get_line_text(line_num)?;
+        let parsed = ParsedInsn::parse(&line_text);
+        
+        // 存入缓存
+        self.parse_cache.insert(line_num, parsed.clone());
+        
+        Some(parsed)
+    }
 
     pub fn trace_backward(&mut self, start_line: usize, target: &str) -> Result<Option<TracePath>> {
         self.visited.clear();
+        self.parse_cache.clear();  // 清空缓存
         println!("\n=== 开始反向追踪: {} 从行{} ===\n", target, start_line + 1);
 
         Ok(self._trace_backward(start_line, target, 0))
@@ -129,6 +150,9 @@ impl TaintEngine {
         let line_text = self.service.get_line_text(line_num)?;
         if depth == 0 { println!("[target line]: {}", line_text); }
 
+        // 使用缓存的解析结果
+        let parsed = self.get_parsed_insn(line_num)?;
+
         let mut path = TracePath {
             line_num,
             instruction: line_text.clone(),
@@ -137,13 +161,10 @@ impl TaintEngine {
             sources: vec![],
         };
 
-        // 使用 InsnAnalyzer 识别指令类型
-        let insn_type = InsnAnalyzer::identify_insn_type(&line_text);
         // 根据类型分发
-        match insn_type {
+        match parsed.insn_type {
             InsnType::Load => {
-                if let Ok((dst_regs, addr, size)) = InsnAnalyzer::parse_load_insn(&line_text) { //解析ld__0x1234_4, 和被操作的寄存器，但被操作的寄存器不止一个啊？这里怎么只提取了一个
-                    // byte_range修复
+                if let Ok((dst_regs, addr, size)) = parsed.get_load_info() {
                     self.debug_log(&format!("  [Load] 目标寄存器: {:?}, target={}, byte_range={:?}", dst_regs, target, self.current_byte_range));
                     
                     let (adjusted_addr, adjusted_size) = self.calculate_adjusted_address(&dst_regs, addr, size, target);
@@ -154,27 +175,24 @@ impl TaintEngine {
                     );
                 }
             }
-            //这里如果不ok会怎么样，直接catch报错行不行
             InsnType::Store => {
-                if let Ok((src_regs, addr, size)) = InsnAnalyzer::parse_store_insn(&line_text) {
+                if let Ok((src_regs, addr, size)) = parsed.get_store_info() {
                     path.trace_type = TraceType::RegToMem(src_regs.join(","));
                     path.sources.extend( self.trace_mem_write(line_num, &src_regs, addr, size, depth));
                 }
             }
             InsnType::Arith | InsnType::Logic => {
                 println!("[AlgOp]");
-                let reg_values = InsnAnalyzer::extract_reg_values(&line_text, PREFIX_REG_READ);
-                let src_regs: Vec<String> = reg_values.iter()
+                let src_regs: Vec<String> = parsed.read_regs.iter()
                     .map(|(reg, val)| format!("{}={}", reg, val))
                     .collect();
                 
-                path.trace_type = TraceType::Arith(reg_values.iter().map(|(r, _)| r.clone()).collect());
+                path.trace_type = TraceType::Arith(parsed.read_regs.iter().map(|(r, _)| r.clone()).collect());
                 path.sources = self.trace_arith_operation(line_num, src_regs, depth);
             }
             InsnType::Move | InsnType::Branch => {
-                let values = InsnAnalyzer::extract_reg_values(&line_text, PREFIX_REG_READ);
                 println!("[debug] branch/move");
-                if let Some((src_reg, value)) = values.first() {
+                if let Some((src_reg, value)) = parsed.read_regs.first() {
                     path.trace_type = TraceType::RegToReg(src_reg.clone());
                     path.sources.extend(
                         self.trace_reg_transfer(line_num, src_reg, value, depth)
@@ -232,15 +250,20 @@ impl TaintEngine {
     fn validate_store_value(
         &mut self,
         load_line_num: usize,
-        store_line_text: &str,
+        store_line_num: usize,
         dst_regs: &[String],
         src_regs: &[String],
         write_offset: usize,
     ) -> bool {
-        // 获取 Load 指令文本
-        let load_line_text = match self.service.get_line_text(load_line_num) {
-            Some(text) => text,
-            None => return true, // 无法获取，跳过校验
+        // 使用缓存获取解析结果
+        let load_parsed = match self.get_parsed_insn(load_line_num) {
+            Some(p) => p,
+            None => return true,
+        };
+        
+        let store_parsed = match self.get_parsed_insn(store_line_num) {
+            Some(p) => p,
+            None => return true,
         };
         
         // 确定目标寄存器
@@ -250,24 +273,23 @@ impl TaintEngine {
             .unwrap_or_default();
         
         if target_reg.is_empty() {
-            return true; // 无目标寄存器，跳过校验
+            return true;
         }
         
         // 提取期望值
-        let write_values = InsnAnalyzer::extract_reg_values(&load_line_text, PREFIX_REG_WRITE);
-        let expected_value = match write_values.iter().find(|(reg, _)| reg == &target_reg) {
+        let expected_value = match load_parsed.write_regs.iter().find(|(reg, _)| reg == &target_reg) {
             Some((_, val)) => val,
-            None => return true, // 无期望值，跳过校验
+            None => return true,
         };
         
         // 找到对应偏移位置的源寄存器
         let src_reg_index = (write_offset / 8).min(src_regs.len().saturating_sub(1));
         let src_reg = match src_regs.get(src_reg_index) {
             Some(reg) => reg,
-            None => return true, // 索引越界，跳过校验
+            None => return true,
         };
         
-        // 检查寄存器类型是否相同（通过首字母判断）
+        // 检查寄存器类型是否相同
         if target_reg.chars().next() != src_reg.chars().next() {
             println!("  ℹ 寄存器类型不同 ({:?} vs {:?})，跳过值校验", 
                      target_reg.chars().next(), src_reg.chars().next());
@@ -275,8 +297,7 @@ impl TaintEngine {
         }
         
         // 提取实际值并校验
-        let actual_values = InsnAnalyzer::extract_reg_values(store_line_text, PREFIX_REG_READ);
-        match actual_values.iter().find(|(r, _)| r == src_reg) {
+        match store_parsed.read_regs.iter().find(|(r, _)| r == src_reg) {
             Some((_, actual_val)) if actual_val != expected_value => {
                 println!("  ⚠ 值不匹配: 期望 {}, 实际 {} (寄存器 {})", 
                          expected_value, actual_val, src_reg);
@@ -287,7 +308,7 @@ impl TaintEngine {
                 println!("  ✓ 值校验通过: {} = {}", src_reg, expected_value);
                 true
             }
-            None => true, // 无法找到实际值，跳过校验
+            None => true,
         }
     }
 
@@ -366,10 +387,12 @@ impl TaintEngine {
         
         loop {
             let prev = self.service.find_prev(current_line, config.clone())?;
-            let prev_line_text = self.service.get_line_text(prev.line_number)?;
             
-            // 解析写入指令
-            if let Ok((src_regs, write_addr, write_size)) = InsnAnalyzer::parse_store_insn(&prev_line_text) {
+            // 使用缓存获取解析结果
+            let parsed = self.get_parsed_insn(prev.line_number)?;
+            
+            // 检查是否是store指令并获取信息
+            if let Ok((src_regs, write_addr, write_size)) = parsed.get_store_info() {
                 // 检查内存重叠
                 if let Some((write_offset, overlap_size)) = InsnAnalyzer::check_memory_overlap(
                     addr, size, write_addr, write_size
@@ -382,10 +405,10 @@ impl TaintEngine {
                              addr,
                              addr + size as u64);
                     
-                    self.debug_log(&format!("    {}", prev_line_text.split(';').take(5).collect::<Vec<_>>().join(";")));
+                    self.debug_log(&format!("    {}", parsed.raw_text.split(';').take(5).collect::<Vec<_>>().join(";")));
 
-                    // 值校验：检查写入的值是否与我们追踪的值匹配
-                    if !self.validate_store_value(line_num, &prev_line_text, dst_regs, &src_regs, write_offset) {
+                    // 值校验
+                    if !self.validate_store_value(line_num, prev.line_number, dst_regs, &src_regs, write_offset) {
                         current_line = prev.line_number;
                         continue;
                     }
@@ -411,13 +434,14 @@ impl TaintEngine {
         }
     }
 
-    // 追踪内存写入（使用 InsnAnalyzer 和 ShadowMemory）
+    // 追踪内存写入（使用 ParsedInsn 和缓存）
     fn trace_mem_write(&mut self, line_num: usize, src_regs: &[String], _addr: u64, _size: usize, depth: usize) -> Option<TracePath> {
         let src_reg = src_regs.first()?;
-        let line_text = self.service.get_line_text(line_num)?;
-        let reg_values = InsnAnalyzer::extract_reg_values(&line_text, PREFIX_REG_READ);
         
-        reg_values.iter()
+        // 使用缓存获取解析结果
+        let parsed = self.get_parsed_insn(line_num)?;
+        
+        parsed.read_regs.iter()
             .find(|(r, _)| r == src_reg)
             .and_then(|(_, value)| {
                 let search_pattern = InsnAnalyzer::gen_reg_write_pattern(src_reg, value);
