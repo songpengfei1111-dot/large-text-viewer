@@ -178,30 +178,37 @@ impl TaintEngine {
             InsnType::Store => {
                 if let Ok((src_regs, addr, size)) = parsed.get_store_info() {
                     path.trace_type = TraceType::RegToMem(src_regs.join(","));
-                    path.sources.extend( self.trace_mem_write(line_num, &src_regs, addr, size, depth));
+                    path.sources.extend(self.trace_mem_write(line_num, &src_regs, addr, size, depth));
                 }
             }
-            InsnType::Arith | InsnType::Logic => {
-                println!("[AlgOp]");
-                let src_regs: Vec<String> = parsed.read_regs.iter()
-                    .map(|(reg, val)| format!("{}={}", reg, val))
-                    .collect();
-                
-                path.trace_type = TraceType::Arith(parsed.read_regs.iter().map(|(r, _)| r.clone()).collect());
-                path.sources = self.trace_arith_operation(line_num, src_regs, depth);
-            }
-            InsnType::Move | InsnType::Branch => {
-                println!("[debug] branch/move");
-                if let Some((src_reg, value)) = parsed.read_regs.first() {
+            InsnType::Arith => {
+                // 所有非 load/store 指令：算术、逻辑、分支、寄存器传递等
+                if parsed.read_regs.is_empty() {
+                    // 没有读取寄存器，说明是常量或终点
+                    println!("终点/常量");
+                    path.trace_type = TraceType::Constant;
+                } else if parsed.read_regs.len() == 1 {
+                    // 单个源寄存器：寄存器传递或分支
+                    println!("[Reg Transfer/Branch]");
+                    let (src_reg, value) = &parsed.read_regs[0];
                     path.trace_type = TraceType::RegToReg(src_reg.clone());
                     path.sources.extend(
                         self.trace_reg_transfer(line_num, src_reg, value, depth)
                     );
+                } else {
+                    // 多个源寄存器：算术或逻辑运算，产生追踪分支
+                    println!("[Arith/Logic] 🌳 追踪分支: {} 个源寄存器", parsed.read_regs.len());
+                    let src_regs: Vec<String> = parsed.read_regs.iter()
+                        .map(|(reg, val)| format!("{}={}", reg, val))
+                        .collect();
+                    
+                    path.trace_type = TraceType::Arith(parsed.read_regs.iter().map(|(r, _)| r.clone()).collect());
+                    path.sources = self.trace_arith_operation(line_num, src_regs, depth);
+                    
+                    if !path.sources.is_empty() {
+                        println!("  ✓ 成功追踪 {} 个分支", path.sources.len());
+                    }
                 }
-            }
-            InsnType::Unknown => {
-                println!("终点/常量");
-                path.trace_type = TraceType::Constant;
             }
         }
 
@@ -405,7 +412,7 @@ impl TaintEngine {
                              addr,
                              addr + size as u64);
                     
-                    self.debug_log(&format!("    {}", parsed.raw_text.split(';').take(5).collect::<Vec<_>>().join(";")));
+                    self.debug_log(&format!("    {}", parsed.raw_text));
 
                     // 值校验
                     if !self.validate_store_value(line_num, prev.line_number, dst_regs, &src_regs, write_offset) {
@@ -479,21 +486,29 @@ impl TaintEngine {
         // 生成搜索 patterns
         let patterns = InsnAnalyzer::gen_arith_patterns(&reg_values);
         
+        println!("  → 开始追踪 {} 个源寄存器:", reg_values.len());
+        
         reg_values.iter()
             .zip(patterns.iter())
-            .filter(|((reg, val), _)| {
+            .enumerate()
+            .filter(|(_, ((reg, val), _))| {
                 // 跳过零寄存器和常量值
                 !InsnAnalyzer::is_zero_register(reg) && !InsnAnalyzer::is_constant_value(val)
             })
-            .filter_map(|((reg, _), pattern)| {
-                println!("[arith] {}", pattern.pattern);
+            .filter_map(|(idx, ((reg, _), pattern))| {
+                println!("  [分支 {}] 追踪寄存器: {}", idx + 1, reg);
+                println!("    搜索模式: {}", pattern.pattern);
                 let config = SearchConfig::new(pattern.pattern.clone()).with_regex(pattern.is_regex);
                 
                 self.service.find_prev(line_num, config)
                     .and_then(|prev| {
-                        println!("\t{}: {}", prev.line_number + 1,
+                        println!("    ✓ 找到 [行 {}]: {}", prev.line_number + 1,
                                  self.service.get_line_text(prev.line_number).unwrap_or_default());
                         self._trace_backward(prev.line_number, reg, depth + 1)
+                    })
+                    .or_else(|| {
+                        println!("    ✗ 未找到来源");
+                        None
                     })
             })
             .collect()

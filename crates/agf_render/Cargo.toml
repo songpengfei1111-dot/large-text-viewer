@@ -1,0 +1,7 @@
+[package]
+name = "agf_render"
+version = "0.1.0"
+edition = "2021"
+description = "Rizin agf graph renderer rewritten in Rust"
+
+[dependencies]

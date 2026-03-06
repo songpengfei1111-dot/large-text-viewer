@@ -13,16 +13,12 @@ const PREFIX_MEM_STORE: &str = "st__";
 // 常见的内存访问大小（字节）
 const COMMON_MEM_SIZES: &[usize] = &[16, 8, 4, 2, 1];
 
-/// 指令类型
+/// 指令类型（简化版本）
 #[derive(Debug, Clone, PartialEq)]
 pub enum InsnType {
-    Load,       // 内存加载指令 (ldr, ldp, ldur等)
-    Store,      // 内存存储指令 (str, stp, stur等)
-    Move,       // 寄存器传递 (mov, mvn等)
-    Arith,      // 算术运算 (add, sub, mul等)
-    Logic,      // 逻辑运算 (and, orr, eor等)
-    Branch,     // 分支指令 (cbz, cbnz, b等)
-    Unknown,
+    Load,       // 内存加载指令 (mem2reg): ldr, ldp, ldur等
+    Store,      // 内存存储指令 (reg2mem): str, stp, stur等
+    Arith,      // 算术/逻辑/分支/传递等所有其他指令
 }
 
 /// 解析后的指令结构体 - 一次解析，多次访问
@@ -81,18 +77,22 @@ impl ParsedInsn {
         let insn = insn_name.to_lowercase();
         
         let type_map: &[(&[&str], InsnType)] = &[
+            // Load 指令
             (&["ldr", "ldp", "ldur", "ldar"], InsnType::Load),
+            // Store 指令
             (&["str", "stp", "stur", "stlr"], InsnType::Store),
-            (&["mov", "mvn"], InsnType::Move),
-            (&["add", "sub", "mul", "div", "neg", "adc", "sbc"], InsnType::Arith),
-            (&["and", "orr", "eor", "bic", "orn", "eon"], InsnType::Logic),
-            (&["b", "b.", "cbz", "cbnz", "tbz", "tbnz"], InsnType::Branch),
+            // Arith 指令：算术、逻辑、分支、传递等
+            (&["mov", "mvn", "add", "sub", "mul", "div", "neg", "adc", "sbc",
+               "and", "orr", "eor", "bic", "orn", "eon",
+               "b", "b.", "cbz", "cbnz", "tbz", "tbnz",
+               "cmp", "cmn", "tst", "asr", "lsl", "lsr", "ror",
+               "madd", "msub", "smull", "umull", "sdiv", "udiv"], InsnType::Arith),
         ];
         
         for (prefixes, insn_type) in type_map {
             if prefixes.iter().any(|prefix| {
                 if *prefix == "b." {
-                    insn.starts_with("b.")
+                    insn.starts_with("b.")  // 特殊处理 b.cond
                 } else {
                     insn.starts_with(prefix)
                 }
@@ -101,7 +101,8 @@ impl ParsedInsn {
             }
         }
         
-        InsnType::Unknown
+        // 未匹配的指令默认归类为 Arith
+        InsnType::Arith
     }
     
     /// 从已分割的parts中提取寄存器值
@@ -478,6 +479,16 @@ mod tests {
         
         assert_eq!(
             InsnAnalyzer::identify_insn_type(";;;add;w22, w22, #1"),
+            InsnType::Arith
+        );
+        
+        assert_eq!(
+            InsnAnalyzer::identify_insn_type(";;;mov;x0, x1"),
+            InsnType::Arith
+        );
+        
+        assert_eq!(
+            InsnAnalyzer::identify_insn_type(";;;cbz;x0, #0x1234"),
             InsnType::Arith
         );
     }
