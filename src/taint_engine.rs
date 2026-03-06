@@ -333,9 +333,10 @@ impl TaintEngine {
     // 追踪内存读取（使用启发式搜索策略）
     fn trace_mem_read(&mut self, line_num: usize, addr: u64, size: usize, dst_regs: &[String], depth: usize) -> Option<TracePath> {
         // 生成按优先级排序的搜索 patterns
-        let search_patterns = InsnAnalyzer::gen_mem_read_patterns(addr, size);
-        
         println!("[mem2mem]: 启发式搜索 0x{:x} ({} 字节)", addr, size);
+        let search_patterns = InsnAnalyzer::gen_mem_read_patterns(addr, size);
+        println!("{:#?}",search_patterns);
+
         
         // 按优先级依次尝试每个 pattern
         for (priority, pattern) in search_patterns.iter().enumerate() {
