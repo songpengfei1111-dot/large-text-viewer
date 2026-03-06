@@ -44,37 +44,28 @@ impl InsnAnalyzer {
         // 指令名称通常在第4个字段
         if let Some(insn_name) = parts.get(3) {
             let insn = insn_name.trim().to_lowercase();
-            
-            const LOAD_PREFIXES: &[&str] = &["ldr", "ldp", "ldur", "ldar"];
-            const STORE_PREFIXES: &[&str] = &["str", "stp", "stur", "stlr"];
-            const MOVE_PREFIXES: &[&str] = &["mov", "mvn"];
-            const ARITH_PREFIXES: &[&str] = &["add", "sub", "mul", "div", "neg", "adc", "sbc"];
-            const LOGIC_PREFIXES: &[&str] = &["and", "orr", "eor", "bic", "orn", "eon"];
-            const BRANCH_PREFIXES: &[&str] = &["cbz", "cbnz", "tbz", "tbnz"];
-            
-            if LOAD_PREFIXES.iter().any(|prefix| insn.starts_with(prefix)) {
-                return InsnType::Load;
-            }
-            
-            if STORE_PREFIXES.iter().any(|prefix| insn.starts_with(prefix)) {
-                return InsnType::Store;
-            }
-            
-            if MOVE_PREFIXES.iter().any(|prefix| insn.starts_with(prefix)) {
-                return InsnType::Move;
-            }
-            
-            if ARITH_PREFIXES.iter().any(|prefix| insn.starts_with(prefix)) {
-                return InsnType::Arith;
-            }
-            
-            if LOGIC_PREFIXES.iter().any(|prefix| insn.starts_with(prefix)) {
-                return InsnType::Logic;
-            }
-            
-            if BRANCH_PREFIXES.iter().any(|prefix| insn.starts_with(prefix)) || 
-               insn == "b" || insn.starts_with("b.") {
-                return InsnType::Branch;
+
+            // 定义指令类型映射
+            let type_map: &[(&[&str], InsnType)] = &[
+                (&["ldr", "ldp", "ldur", "ldar"], InsnType::Load),
+                (&["str", "stp", "stur", "stlr"], InsnType::Store),
+                (&["mov", "mvn"], InsnType::Move),
+                (&["add", "sub", "mul", "div", "neg", "adc", "sbc"], InsnType::Arith),
+                (&["and", "orr", "eor", "bic", "orn", "eon"], InsnType::Logic),
+                (&["b", "b.", "cbz", "cbnz", "tbz", "tbnz"], InsnType::Branch),
+            ];
+
+            // 查找匹配的类型
+            for (prefixes, insn_type) in type_map {
+                if prefixes.iter().any(|prefix| {
+                    if *prefix == "b." {
+                        insn.starts_with("b.")  // 特殊处理 b.cond
+                    } else {
+                        insn.starts_with(prefix)
+                    }
+                }) {
+                    return insn_type.clone();
+                }
             }
         }
         
@@ -84,6 +75,7 @@ impl InsnAnalyzer {
     /// 通用的内存指令解析方法
     /// marker: "ld__" 或 "st__"
     /// 返回: (寄存器列表, 内存地址, 访问大小)
+    /// 可以简化逻辑为一个正则
     fn parse_mem_insn(line_text: &str, marker: &str) -> Result<(Vec<String>, u64, usize)> {
         let parts: Vec<&str> = line_text.split(SEP).collect();
         

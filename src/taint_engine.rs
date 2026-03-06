@@ -120,6 +120,7 @@ impl TaintEngine {
         Ok(self._trace_backward(start_line, target, 0))
     }
 
+    //递归调用这个函数
     fn _trace_backward(&mut self, line_num: usize, target: &str, depth: usize) -> Option<TracePath> {
         if depth >= self.max_depth { return None; }
 
@@ -138,15 +139,14 @@ impl TaintEngine {
 
         // 使用 InsnAnalyzer 识别指令类型
         let insn_type = InsnAnalyzer::identify_insn_type(&line_text);
-
+        // 根据类型分发
         match insn_type {
             InsnType::Load => {
-                if let Ok((dst_regs, addr, size)) = InsnAnalyzer::parse_load_insn(&line_text) {
-                    self.debug_log(&format!("  [Load] 目标寄存器: {:?}, target={}, byte_range={:?}", 
-                                 dst_regs, target, self.current_byte_range));
+                if let Ok((dst_regs, addr, size)) = InsnAnalyzer::parse_load_insn(&line_text) { //解析ld__0x1234_4, 和被操作的寄存器，但被操作的寄存器不止一个啊？这里怎么只提取了一个
+                    // byte_range修复
+                    self.debug_log(&format!("  [Load] 目标寄存器: {:?}, target={}, byte_range={:?}", dst_regs, target, self.current_byte_range));
                     
-                    let (adjusted_addr, adjusted_size) = 
-                        self.calculate_adjusted_address(&dst_regs, addr, size, target);
+                    let (adjusted_addr, adjusted_size) = self.calculate_adjusted_address(&dst_regs, addr, size, target);
                     
                     path.trace_type = TraceType::MemToReg(format!("0x{:x}", adjusted_addr));
                     path.sources.extend(
@@ -154,21 +154,11 @@ impl TaintEngine {
                     );
                 }
             }
+            //这里如果不ok会怎么样，直接catch报错行不行
             InsnType::Store => {
                 if let Ok((src_regs, addr, size)) = InsnAnalyzer::parse_store_insn(&line_text) {
                     path.trace_type = TraceType::RegToMem(src_regs.join(","));
-                    path.sources.extend(
-                        self.trace_mem_write(line_num, &src_regs, addr, size, depth)
-                    );
-                }
-            }
-            InsnType::Move | InsnType::Branch => {
-                let values = InsnAnalyzer::extract_reg_values(&line_text, PREFIX_REG_READ);
-                if let Some((src_reg, value)) = values.first() {
-                    path.trace_type = TraceType::RegToReg(src_reg.clone());
-                    path.sources.extend(
-                        self.trace_reg_transfer(line_num, src_reg, value, depth)
-                    );
+                    path.sources.extend( self.trace_mem_write(line_num, &src_regs, addr, size, depth));
                 }
             }
             InsnType::Arith | InsnType::Logic => {
@@ -181,6 +171,16 @@ impl TaintEngine {
                 path.trace_type = TraceType::Arith(reg_values.iter().map(|(r, _)| r.clone()).collect());
                 path.sources = self.trace_arith_operation(line_num, src_regs, depth);
             }
+            InsnType::Move | InsnType::Branch => {
+                let values = InsnAnalyzer::extract_reg_values(&line_text, PREFIX_REG_READ);
+                println!("[debug] branch/move");
+                if let Some((src_reg, value)) = values.first() {
+                    path.trace_type = TraceType::RegToReg(src_reg.clone());
+                    path.sources.extend(
+                        self.trace_reg_transfer(line_num, src_reg, value, depth)
+                    );
+                }
+            }
             InsnType::Unknown => {
                 println!("终点/常量");
                 path.trace_type = TraceType::Constant;
@@ -189,7 +189,7 @@ impl TaintEngine {
 
         Some(path)
     }
-    /// 计算调整后的内存地址和大小（处理多寄存器和字节偏移）
+    /// 计算调整后的内存地址和大小（处理多寄存器和字节偏移,内存对齐）
     fn calculate_adjusted_address(
         &self,
         dst_regs: &[String],
@@ -521,30 +521,13 @@ pub fn test_taint_overlap() -> anyhow::Result<()> {
     println!("\n=== 追踪内存地址: ld__6cf01586a8_8 (测试内存重叠) ===\n");
     // ldr x21, [sp, #0xc08] 读取 0x6cf01586a8 (8字节)
     // 应该找到 str q0, [x19] 写入 0x6cf01586a0 (16字节)
+    // if let Some(trace) = engine.trace_backward(11922-1, "st__6cf0157918_8")? {
     if let Some(trace) = engine.trace_backward(9217, "ld__6cf01586a8_8")? {
         println!("\n=== 追踪结果 ===\n");
         trace.print();
         println!("\n统计信息:");
         println!("  - 最大深度: {}", trace.max_depth());
         println!("  - 指令数量: {}", trace.count_instructions());
-    }
-
-    Ok(())
-}
-
-pub fn test_taint_1() -> anyhow::Result<()> {
-    use large_text_core::file_reader::FileReader;
-
-    let file_path = std::path::PathBuf::from("/Users/teng/RustroverProjects/large-text-viewer/logs/record_01.csv");
-    let reader = FileReader::new(file_path, encoding_rs::UTF_8)?;
-    let service = SearchService::new(reader);
-
-    let mut engine = TaintEngine::new(service).with_max_depth(15);
-
-    println!("\n=== 追踪内存地址: ===\n");
-    // if let Some(trace) = engine.trace_backward(11923, "st__6cf0157918_8")? { //err
-    if let Some(_trace) = engine.trace_backward(11922-1, "st__6cf0157918_8")? {
-        // trace.print();
     }
 
     Ok(())
