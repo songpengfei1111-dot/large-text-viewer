@@ -25,7 +25,7 @@ fn main() {
     // 运行实际的污点追踪
     // let _ = taint_engine::test_taint();
     // let _ = taint_engine::test_taint_1();
-    // let _ = taint_engine::test_taint_overlap();
+    let _ = taint_engine::test_taint_overlap();
     
     // 其他测试
     // test_reg::test_reg();
@@ -33,10 +33,11 @@ fn main() {
     // insn_il::test_parse_instruction();
 
     // 测试 agf_render 功能
-    test_agf_render();
+    // test_agf_render();
 }
 
 /// 测试 agf_render 的 CFG 渲染功能
+/// 注意不能出现中文文本，不然长度计算回出现误差
 fn test_agf_render() {
     use agf_render::{Graph, EdgeColor, layout, render_to_stdout};
 
@@ -48,15 +49,19 @@ fn test_agf_render() {
     // 添加节点
     let entry = g.add_node(
         "entry",
-        "push rbp\nmov rbp, rsp\ncmp eax, 0\nje false_branch",
+        "push rbp\n\
+        mov rbp, rsp\n\
+        cmp eax, 0\n\
+        je false_branch",
     );
     let true_branch = g.add_node(
         "true_branch",
-        "mov eax, 1\njmp exit",
+        "mov eax, 1\n\
+        jmp exit",
     );
     let false_branch = g.add_node(
         "false_branch",
-        "mov eax, 0",
+        "mov eax, 0 asdlfjasdfasdkjhjkhkhk",
     );
     let exit = g.add_node(
         "exit",
@@ -68,6 +73,7 @@ fn test_agf_render() {
     g.add_edge(entry, false_branch, EdgeColor::True);  // 跳转
     g.add_edge_uncond(true_branch, exit);
     g.add_edge_uncond(false_branch, exit);
+
 
     // 执行布局算法
     layout(&mut g);
