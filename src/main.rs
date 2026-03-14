@@ -1,7 +1,9 @@
 mod cli_core;
 mod taint_engine;
 mod search_service;
-mod insn_analyzer;    // 新增
+mod insn_analyzer;
+mod trace_path_tree;
+// 新增
 
 // use std::env;
 // fn main() -> eframe::Result<()> {
@@ -34,7 +36,7 @@ fn main() {
 
     // 测试 agf_render 功能
     // test_agf_render();
-    test_binatree_render()
+    test_binatree_render()  //二叉树测试
 }
 
 
@@ -357,7 +359,9 @@ fn test_binatree_render() {
     tree.add_left(2, 4);
     tree.add_right(2, 5);
     tree.add_right(3, 6);
-    tree.add_right(6, 7);
+
+    tree.add_right(6, 7); // 如果取消注释这一行，就会产生bug，图形异常
+    tree.add_right(7, 8); // 如果取消注释这一行，就会产生bug，图形异常
 
     println!("=== 使用 agf_render 渲染二叉树 ===\n");
 

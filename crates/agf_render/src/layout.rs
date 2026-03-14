@@ -35,9 +35,16 @@ pub fn layout(g: &mut Graph) {
         return;
     }
 
-    // 4. 初始化 pos_in_layer（按任意顺序）
+    // 4. 初始化 pos_in_layer（按节点 ID 顺序，确保初始顺序稳定）
     for layer in 0..n_layers as i32 {
-        for (pos, id) in g.layer_nodes(layer).iter().enumerate() {
+        let mut nodes_in_layer: Vec<NodeId> = g
+            .nodes
+            .iter()
+            .filter(|n| n.layer == layer)
+            .map(|n| n.id)
+            .collect();
+        nodes_in_layer.sort();
+        for (pos, id) in nodes_in_layer.iter().enumerate() {
             g.nodes[*id].pos_in_layer = pos as i32;
         }
     }
@@ -223,15 +230,11 @@ fn insert_dummy_nodes(g: &mut Graph) {
 // ─────────────────────────────────────────────────────────────
 
 fn minimize_crossings(g: &mut Graph, n_layers: usize) {
-    // 多次前向+后向扫描（rizin 默认跑多轮）
+    // 只进行前向扫描，对于有根树（如二叉树）效果更好
     for _ in 0..4 {
         // 前向扫描：第 1 层开始，根据上一层节点位置排序
         for layer in 1..n_layers as i32 {
             reorder_by_barycenter(g, layer, true);
-        }
-        // 后向扫描：倒数第二层开始，根据下一层节点位置排序
-        for layer in (0..n_layers as i32 - 1).rev() {
-            reorder_by_barycenter(g, layer, false);
         }
     }
 }
@@ -244,10 +247,11 @@ fn reorder_by_barycenter(g: &mut Graph, layer: i32, use_prev: bool) {
         return;
     }
 
-    // 计算每个节点的重心值（邻居在相邻层中的平均位置）
-    let mut scores: Vec<(NodeId, f64)> = nodes_in_layer
+    // 计算每个节点的重心值（邻居在相邻层中的平均位置），并记录原始索引
+    let mut scores: Vec<(NodeId, f64, usize)> = nodes_in_layer
         .iter()
-        .map(|&id| {
+        .enumerate()
+        .map(|(orig_idx, &id)| {
             let neighbors: Vec<NodeId> = if use_prev {
                 g.in_neighbors(id)
             } else {
@@ -268,15 +272,19 @@ fn reorder_by_barycenter(g: &mut Graph, layer: i32, use_prev: bool) {
                 positions.iter().sum::<i32>() as f64 / positions.len() as f64
             };
 
-            (id, score)
+            (id, score, orig_idx)
         })
         .collect();
 
-    // 按重心值稳定排序
-    scores.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+    // 按重心值稳定排序，如果重心值相同，则按原始索引排序保持稳定
+    scores.sort_by(|a, b| {
+        a.1.partial_cmp(&b.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.2.cmp(&b.2))
+    });
 
     // 更新 pos_in_layer
-    for (pos, (id, _)) in scores.iter().enumerate() {
+    for (pos, (id, _, _)) in scores.iter().enumerate() {
         g.nodes[*id].pos_in_layer = pos as i32;
     }
 }
