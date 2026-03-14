@@ -1,6 +1,7 @@
 // taint_engine.rs
 use crate::search_service::{SearchService, SearchConfig};
 use crate::insn_analyzer::{InsnAnalyzer, InsnType, ParsedInsn};
+use crate::trace_path_tree::TracePathTree;
 use anyhow::Result;
 use std::collections::{HashSet, HashMap};
 
@@ -75,6 +76,15 @@ impl TracePath {
     /// 统计追踪的指令数量
     pub fn count_instructions(&self) -> usize {
         1 + self.sources.iter().map(|s| s.count_instructions()).sum::<usize>()
+    }
+
+    /// 将 TracePath 渲染为二叉树
+    pub fn render_as_tree(&self) {
+        use crate::trace_path_tree::TracePathTree;
+        println!("\n=== 渲染追踪路径为二叉树 ===\n");
+        let tree = TracePathTree::from_trace_path(self);
+        tree.render();
+        println!("\n=== 二叉树渲染完成 ===\n");
     }
 }
 
@@ -533,7 +543,9 @@ impl TaintEngine {
 pub fn test_taint() -> anyhow::Result<()> {
     use large_text_core::file_reader::FileReader;
 
-    let file_path = std::path::PathBuf::from("/Users/teng/RustroverProjects/large-text-viewer/logs/record_01.csv");
+    // let file_path = std::path::PathBuf::from("/Users/teng/RustroverProjects/large-text-viewer/logs/record_01.csv");
+    let file_path = std::path::PathBuf::from("/Users/bytedance/RustroverProjects/logs/record_01.csv");
+
     let reader = FileReader::new(file_path, encoding_rs::UTF_8)?;
     let service = SearchService::new(reader);
 
@@ -551,7 +563,8 @@ pub fn test_taint() -> anyhow::Result<()> {
 pub fn test_taint_overlap() -> anyhow::Result<()> {
     use large_text_core::file_reader::FileReader;
 
-    let file_path = std::path::PathBuf::from("/Users/teng/RustroverProjects/large-text-viewer/logs/record_01.csv");
+    // let file_path = std::path::PathBuf::from("/Users/teng/RustroverProjects/large-text-viewer/logs/record_01.csv");
+    let file_path = std::path::PathBuf::from("/Users/bytedance/RustroverProjects/logs/record_01.csv");
     let reader = FileReader::new(file_path, encoding_rs::UTF_8)?;
     let service = SearchService::new(reader);
 
@@ -569,6 +582,9 @@ pub fn test_taint_overlap() -> anyhow::Result<()> {
         println!("\n统计信息:");
         println!("  - 最大深度: {}", trace.max_depth());
         println!("  - 指令数量: {}", trace.count_instructions());
+        
+        println!("\n=== 开始渲染二叉树 ===\n");
+        trace.render_as_tree();
     }
 
     Ok(())
