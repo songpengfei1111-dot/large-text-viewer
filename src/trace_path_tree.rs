@@ -1,8 +1,9 @@
 use agf_render::{Graph, EdgeColor, layout, render_to_stdout};
-use crate::taint_engine::{TracePath, TraceType};
+use crate::taint_engine::TracePath;
+use crate::insn_analyzer::ParsedInsn;
 use std::fmt;
 
-const MAX_LINE_LENGTH: usize = 60;
+const MAX_LINE_LENGTH: usize = 45;
 
 #[derive(Debug, Clone)]
 pub struct TreeNode<T> {
@@ -204,17 +205,19 @@ impl TracePathTree {
     }
 
     fn format_trace_line(trace: &TracePath) -> String {
-        let type_str = match &trace.trace_type {
-            TraceType::MemToReg(addr) => format!("📥 Mem->Reg ({})", addr),
-            TraceType::RegToMem(reg) => format!("📤 Reg->Mem ({})", reg),
-            TraceType::RegToReg(reg) => format!("🔄 Reg->Reg ({})", reg),
-            TraceType::Arith(regs) => format!("🧮 Arith ({})", regs.join(",")),
-            TraceType::Constant => "🎯 Constant".to_string(),
-            TraceType::Unknown => "❓ Unknown".to_string(),
-        };
+        let parts: Vec<&str> = trace.instruction.split(';').collect();
         
-        let instruction_short = trace.instruction.split(';').take(4).collect::<Vec<_>>().join(";");
-        let line = format!("[{}] {} | {}", trace.line_num + 1, type_str, instruction_short);
+        let line_num = trace.line_num + 1;
+        let insn_name = parts.get(3).unwrap_or(&"").trim();
+        
+        let mut mem_info = String::new();
+        if let Some(parsed) = &trace.parsed_insn {
+            if let Some(addr) = parsed.mem_addr {
+                mem_info = format!(" @0x{:x}", addr);
+            }
+        }
+        
+        let line = format!("[{}] {}{}", line_num, insn_name, mem_info);
         Self::truncate_text(&line, MAX_LINE_LENGTH)
     }
 

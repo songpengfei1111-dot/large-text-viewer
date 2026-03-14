@@ -196,83 +196,9 @@ impl ParsedInsn {
         
         Ok((self.get_read_reg_names(), addr, size))
     }
-}
-
-/// 搜索模式
-#[derive(Debug, Clone)]
-pub struct SearchPattern {
-    pub pattern: String,
-    pub is_regex: bool,
-    pub description: String,
-}
-
-/// 指令分析器
-pub struct InsnAnalyzer;
-
-impl InsnAnalyzer {
-    /// 识别指令类型（保留用于向后兼容）
-    pub fn identify_insn_type(line_text: &str) -> InsnType {
-        ParsedInsn::parse(line_text).insn_type
-    }
-
-    /// 解析加载指令（保留用于向后兼容）
-    pub fn parse_load_insn(line_text: &str) -> Result<(Vec<String>, u64, usize)> {
-        ParsedInsn::parse(line_text).get_load_info()
-    }
-
-    /// 解析存储指令（保留用于向后兼容）
-    pub fn parse_store_insn(line_text: &str) -> Result<(Vec<String>, u64, usize)> {
-        ParsedInsn::parse(line_text).get_store_info()
-    }
-
-    /// 提取读取的寄存器（保留用于向后兼容）
-    pub fn extract_read_regs(line_text: &str) -> Vec<String> {
-        ParsedInsn::parse(line_text).get_read_reg_names()
-    }
-
-    /// 提取写入的寄存器（保留用于向后兼容）
-    pub fn extract_write_regs(line_text: &str) -> Vec<String> {
-        ParsedInsn::parse(line_text).get_write_reg_names()
-    }
-
-    /// 提取寄存器及其值（保留用于向后兼容）
-    pub fn extract_reg_values(line_text: &str, prefix: &str) -> Vec<(String, String)> {
-        let parsed = ParsedInsn::parse(line_text);
-        if prefix == PREFIX_REG_READ {
-            parsed.read_regs
-        } else if prefix == PREFIX_REG_WRITE {
-            parsed.write_regs
-        } else {
-            vec![]
-        }
-    }
-
+    
     /// 生成内存读取的搜索pattern列表（按优先级排序）
-    /// 用于追踪: 哪条指令写入了这个内存地址
-    ///
-    /// 1. 单寄存器的情况
-    /// 策略：从最精确到最宽泛
-    /// 1.1. 精确匹配：st__<addr>_* (任意大小写入该地址)
-    /// 1.2. 重叠匹配：向前查找可能覆盖该地址的写入
-    ///    - 如果写入地址 < 读取地址，且 写入地址 + 写入大小 > 读取地址，则重叠
-    /// 
-    /// 例如: ldr w8, [0x6cf01586a0] (读4字节，地址 0xa0)
-    /// - 优先级1: st__6cf01586a0_* (精确匹配地址)
-    /// - 优先级2: st__6cf0158698_8 (0x98+8=0xa0，刚好覆盖)
-    /// - 优先级3: st__6cf0158690_16 (0x90+16=0xa0，刚好覆盖)
-    /// - 优先级4: st__6cf0158698_16 (0x98+16>0xa0，覆盖)
-    /// - 优先级5: st__6cf0158690_* (0x90开始的任意大小，可能覆盖)
-    ///
-    ///
-    /// 2. 多寄存器的情况，且追踪目标非第一个被操作的寄存器
-    /// 策略：根据寄存器的位置进行搜索
-    /// 6d2d6959c8;529c8;a94022a9;ldp;x9, x8, [x21];;mr__6ccbf25fe0;ld__6ccbf25fe0_16;rw__x9=0x10000_x8=0x1e8;
-    /// 如果目标是x8 (寄存器2) 则
-    /// 1. 优先启发式搜索 st__6ccbf25fe8_ 因为两个寄存器合起来ldp是ld__6ccbf25fe0_16
-    /// 2. 搜索被覆写的情况 st__6ccbf25fe0_16, st__6cf01590d0_32
-    ///
     pub fn gen_mem_read_patterns(addr: u64, size: usize) -> Vec<SearchPattern> {
-        // 修改逻辑，对应单寄存器读写
         let mut patterns = Vec::new();
         
         // 优先级1: 精确匹配地址（任意大小）
@@ -326,7 +252,7 @@ impl InsnAnalyzer {
         }
     }
     
-    /// 生成单个内存读取的搜索pattern（向后兼容）
+    /// 生成单个内存读取的搜索pattern
     pub fn gen_mem_read_pattern(addr: u64, size: usize) -> SearchPattern {
         SearchPattern {
             pattern: format!("{}{:x}_", PREFIX_MEM_STORE, addr),
@@ -336,11 +262,6 @@ impl InsnAnalyzer {
     }
 
     /// 检查内存访问是否重叠
-    /// read_addr: 读取的起始地址
-    /// read_size: 读取的字节数
-    /// write_addr: 写入的起始地址
-    /// write_size: 写入的字节数
-    /// 返回: (是否重叠, 写入偏移, 重叠字节数)
     pub fn check_memory_overlap(
         read_addr: u64,
         read_size: usize,
@@ -367,7 +288,6 @@ impl InsnAnalyzer {
     }
 
     /// 生成寄存器写入的搜索pattern
-    /// 用于追踪: 哪条指令写入了这个寄存器
     pub fn gen_reg_write_pattern(reg: &str, value: &str) -> SearchPattern {
         // 去掉寄存器前缀 (x0 -> 0, w8 -> 8)
         let reg_num = reg.trim_start_matches(|c: char| !c.is_numeric());
@@ -381,7 +301,6 @@ impl InsnAnalyzer {
     }
 
     /// 生成寄存器读取的搜索pattern
-    /// 用于追踪: 这个寄存器的值从哪里来
     pub fn gen_reg_read_pattern(reg: &str, value: &str) -> SearchPattern {
         let pattern = format!("rw__{}={}", reg, value);
         
@@ -393,8 +312,6 @@ impl InsnAnalyzer {
     }
 
     /// 生成算术运算的搜索pattern
-    /// 用于追踪: 源寄存器的值从哪里来
-    /// 注意: 需要匹配读取的值（rr__），而不是写入的值（rw__）
     pub fn gen_arith_patterns(src_regs: &[(String, String)]) -> Vec<SearchPattern> {
         src_regs.iter()
             .map(|(reg, val)| {
@@ -436,8 +353,17 @@ impl InsnAnalyzer {
             _ => 8,
         }
     }
-
 }
+
+/// 搜索模式
+#[derive(Debug, Clone)]
+pub struct SearchPattern {
+    pub pattern: String,
+    pub is_regex: bool,
+    pub description: String,
+}
+
+
 
 #[cfg(test)]
 mod tests {
@@ -447,7 +373,8 @@ mod tests {
     fn test_parse_load_insn() {
         let line = "6d2d76e78c;12b78c;b94c03e8;ldr;w8, [sp, #0xc00];;mr__6cf0157aa0_#0xc00;ld__6cf01586a0_4;rw__w8=0x1;";
         
-        let (dst_regs, addr, size) = InsnAnalyzer::parse_load_insn(line).unwrap();
+        let parsed = ParsedInsn::parse(line);
+        let (dst_regs, addr, size) = parsed.get_load_info().unwrap();
         
         assert_eq!(addr, 0x6cf01586a0);
         assert_eq!(size, 4);
@@ -458,7 +385,8 @@ mod tests {
     fn test_parse_store_insn() {
         let line = "6d2d694ed4;51ed4;3d800260;str;q0, [x19];rr__q0=0x0x0100000001000000e061f2cb6c000000;mw__6cf01586a0;st__6cf01586a0_16;;";
         
-        let (src_regs, addr, size) = InsnAnalyzer::parse_store_insn(line).unwrap();
+        let parsed = ParsedInsn::parse(line);
+        let (src_regs, addr, size) = parsed.get_store_info().unwrap();
         
         assert_eq!(addr, 0x6cf01586a0);
         assert_eq!(size, 16);
@@ -468,27 +396,27 @@ mod tests {
     #[test]
     fn test_identify_insn_type() {
         assert_eq!(
-            InsnAnalyzer::identify_insn_type(";;;ldr;w8, [sp]"),
+            ParsedInsn::parse(";;;ldr;w8, [sp]").insn_type,
             InsnType::Load
         );
         
         assert_eq!(
-            InsnAnalyzer::identify_insn_type(";;;str;q0, [x19]"),
+            ParsedInsn::parse(";;;str;q0, [x19]").insn_type,
             InsnType::Store
         );
         
         assert_eq!(
-            InsnAnalyzer::identify_insn_type(";;;add;w22, w22, #1"),
+            ParsedInsn::parse(";;;add;w22, w22, #1").insn_type,
             InsnType::Arith
         );
         
         assert_eq!(
-            InsnAnalyzer::identify_insn_type(";;;mov;x0, x1"),
+            ParsedInsn::parse(";;;mov;x0, x1").insn_type,
             InsnType::Arith
         );
         
         assert_eq!(
-            InsnAnalyzer::identify_insn_type(";;;cbz;x0, #0x1234"),
+            ParsedInsn::parse(";;;cbz;x0, #0x1234").insn_type,
             InsnType::Arith
         );
     }
@@ -497,7 +425,7 @@ mod tests {
     fn test_gen_patterns() {
         // 测试启发式搜索 patterns
         // 场景: ldr w8, [0x6cf01586a0] (读4字节)
-        let patterns = InsnAnalyzer::gen_mem_read_patterns(0x6cf01586a0, 4);
+        let patterns = ParsedInsn::gen_mem_read_patterns(0x6cf01586a0, 4);
         
         println!("生成的搜索 patterns:");
         for (i, p) in patterns.iter().enumerate() {
@@ -518,36 +446,36 @@ mod tests {
         assert!(has_0x90_16, "应该包含 st__6cf0158690_16");
         
         // 测试寄存器 pattern
-        let pattern = InsnAnalyzer::gen_reg_write_pattern("w8", "0x1");
+        let pattern = ParsedInsn::gen_reg_write_pattern("w8", "0x1");
         assert_eq!(pattern.pattern, "rw_.*8=0x1");
         assert!(pattern.is_regex);
         
         // 测试算术运算 pattern
         let reg_values = vec![("w22".to_string(), "0x0".to_string())];
-        let patterns = InsnAnalyzer::gen_arith_patterns(&reg_values);
+        let patterns = ParsedInsn::gen_arith_patterns(&reg_values);
         assert_eq!(patterns[0].pattern, "rw_.*22=0x0");
         assert!(patterns[0].is_regex);
     }
     
     #[test]
     fn test_alignment() {
-        assert!(InsnAnalyzer::is_aligned(0x100, 1));
-        assert!(InsnAnalyzer::is_aligned(0x100, 2));
-        assert!(InsnAnalyzer::is_aligned(0x100, 4));
-        assert!(InsnAnalyzer::is_aligned(0x100, 8));
-        assert!(InsnAnalyzer::is_aligned(0x100, 16));
+        assert!(ParsedInsn::is_aligned(0x100, 1));
+        assert!(ParsedInsn::is_aligned(0x100, 2));
+        assert!(ParsedInsn::is_aligned(0x100, 4));
+        assert!(ParsedInsn::is_aligned(0x100, 8));
+        assert!(ParsedInsn::is_aligned(0x100, 16));
         
-        assert!(!InsnAnalyzer::is_aligned(0x101, 2));
-        assert!(!InsnAnalyzer::is_aligned(0x102, 4));
-        assert!(!InsnAnalyzer::is_aligned(0x104, 8));
-        assert!(!InsnAnalyzer::is_aligned(0x108, 16));
+        assert!(!ParsedInsn::is_aligned(0x101, 2));
+        assert!(!ParsedInsn::is_aligned(0x102, 4));
+        assert!(!ParsedInsn::is_aligned(0x104, 8));
+        assert!(!ParsedInsn::is_aligned(0x108, 16));
     }
 
     #[test]
     fn test_memory_overlap() {
         // 场景1: ldr w8, [0x6cf01586a0] (4字节) vs str q0, [0x6cf01586a0] (16字节)
         // 完全覆盖
-        let result = InsnAnalyzer::check_memory_overlap(
+        let result = ParsedInsn::check_memory_overlap(
             0x6cf01586a0, 4,  // read
             0x6cf01586a0, 16  // write
         );
@@ -555,7 +483,7 @@ mod tests {
 
         // 场景2: ldr x21, [0x6cf01586a8] (8字节) vs str q0, [0x6cf01586a0] (16字节)
         // 部分覆盖
-        let result = InsnAnalyzer::check_memory_overlap(
+        let result = ParsedInsn::check_memory_overlap(
             0x6cf01586a8, 8,  // read: 0xa8-0xaf
             0x6cf01586a0, 16  // write: 0xa0-0xaf
         );
@@ -563,7 +491,7 @@ mod tests {
 
         // 场景3: ldr w8, [0x6cf01586b0] (4字节) vs str q0, [0x6cf01586a0] (16字节)
         // 不重叠
-        let result = InsnAnalyzer::check_memory_overlap(
+        let result = ParsedInsn::check_memory_overlap(
             0x6cf01586b0, 4,  // read: 0xb0-0xb3
             0x6cf01586a0, 16  // write: 0xa0-0xaf
         );
@@ -571,7 +499,7 @@ mod tests {
 
         // 场景4: ldr x0, [0x6cf01586a4] (8字节) vs str q0, [0x6cf01586a0] (16字节)
         // 部分覆盖（跨中间）
-        let result = InsnAnalyzer::check_memory_overlap(
+        let result = ParsedInsn::check_memory_overlap(
             0x6cf01586a4, 8,  // read: 0xa4-0xab
             0x6cf01586a0, 16  // write: 0xa0-0xaf
         );

@@ -1,6 +1,6 @@
 // taint_engine.rs
 use crate::search_service::{SearchService, SearchConfig};
-use crate::insn_analyzer::{InsnAnalyzer, InsnType, ParsedInsn};
+use crate::insn_analyzer::{InsnType, ParsedInsn};
 use crate::trace_path_tree::TracePathTree;
 use anyhow::Result;
 use std::collections::{HashSet, HashMap};
@@ -30,6 +30,7 @@ pub struct TracePath {
     pub trace_type: TraceType,
     pub depth: usize,
     pub sources: Vec<TracePath>,
+    pub parsed_insn: Option<crate::insn_analyzer::ParsedInsn>,
 }
 
 impl TracePath {
@@ -170,6 +171,7 @@ impl TaintEngine {
             trace_type: TraceType::Unknown,
             depth,
             sources: vec![],
+            parsed_insn: Some(parsed.clone()),
         };
 
         // 根据类型分发
@@ -240,7 +242,7 @@ impl TaintEngine {
         // 情况1: 有字节偏移上下文
         if let Some((target_reg, byte_offset, byte_size)) = &self.current_byte_range {
             if let Some(reg_index) = dst_regs.iter().position(|r| r == target_reg) {
-                let reg_size = InsnAnalyzer::get_reg_size(target_reg);
+                let reg_size = ParsedInsn::get_reg_size(target_reg);
                 let mem_offset = reg_index * reg_size;
                 let new_addr = addr + mem_offset as u64 + *byte_offset as u64;
                 println!("  [字节追踪] 寄存器 {} 在位置 {}, 调整搜索: 0x{:x}[{}] -> 0x{:x}[{}]",
@@ -252,7 +254,7 @@ impl TaintEngine {
         // 情况2: 多寄存器指令
         if dst_regs.len() > 1 {
             if let Some(reg_index) = dst_regs.iter().position(|r| r == target) {
-                let reg_size = InsnAnalyzer::get_reg_size(target);
+                let reg_size = ParsedInsn::get_reg_size(target);
                 let mem_offset = reg_index * reg_size;
                 let new_addr = addr + mem_offset as u64;
                 println!("  [多寄存器] 寄存器 {} 在位置 {}, 调整搜索: 0x{:x}[{}] -> 0x{:x}[{}]",
@@ -347,7 +349,7 @@ impl TaintEngine {
         // 计算应该追踪哪个源寄存器
         let src_reg_index = (write_offset / 8).min(src_regs.len().saturating_sub(1));
         let src_reg = &src_regs[src_reg_index];
-        let reg_size = InsnAnalyzer::get_reg_size(src_reg);
+        let reg_size = ParsedInsn::get_reg_size(src_reg);
         
         // 计算在该源寄存器内的偏移
         let reg_internal_offset = write_offset.saturating_sub(src_reg_index * reg_size);
@@ -373,7 +375,7 @@ impl TaintEngine {
     fn trace_mem_read(&mut self, line_num: usize, addr: u64, size: usize, dst_regs: &[String], depth: usize) -> Option<TracePath> {
         // 生成按优先级排序的搜索 patterns
         println!("[mem2mem]: 启发式搜索 0x{:x} ({} 字节)", addr, size);
-        let search_patterns = InsnAnalyzer::gen_mem_read_patterns(addr, size);
+        let search_patterns = ParsedInsn::gen_mem_read_patterns(addr, size);
         println!("{:#?}",search_patterns);
 
         
@@ -412,7 +414,7 @@ impl TaintEngine {
             // 检查是否是store指令并获取信息
             if let Ok((src_regs, write_addr, write_size)) = parsed.get_store_info() {
                 // 检查内存重叠
-                if let Some((write_offset, overlap_size)) = InsnAnalyzer::check_memory_overlap(
+                if let Some((write_offset, overlap_size)) = ParsedInsn::check_memory_overlap(
                     addr, size, write_addr, write_size
                 ) {
                     println!("  ✓ 找到匹配 [行 {}]: write[0x{:x}+{}:{}] -> read[0x{:x}:0x{:x}]", 
@@ -462,7 +464,7 @@ impl TaintEngine {
         parsed.read_regs.iter()
             .find(|(r, _)| r == src_reg)
             .and_then(|(_, value)| {
-                let search_pattern = InsnAnalyzer::gen_reg_write_pattern(src_reg, value);
+                let search_pattern = ParsedInsn::gen_reg_write_pattern(src_reg, value);
                 println!("[regW] {}", search_pattern.pattern);
                 
                 let config = SearchConfig::new(search_pattern.pattern).with_regex(search_pattern.is_regex);
@@ -472,12 +474,12 @@ impl TaintEngine {
 
     // 追踪寄存器传递,从rr__到rw__（使用 InsnAnalyzer）
     fn trace_reg_transfer(&mut self, line_num: usize, reg: &str, _value: &str, depth: usize) -> Option<TracePath> {
-        if InsnAnalyzer::is_zero_register(reg) {
+        if ParsedInsn::is_zero_register(reg) {
             println!("终点: 零寄存器 {}", reg);
             return None;
         }
         
-        let search_pattern = InsnAnalyzer::gen_reg_read_pattern(reg, _value);
+        let search_pattern = ParsedInsn::gen_reg_read_pattern(reg, _value);
         println!("[reg2reg]: {}", search_pattern.pattern);
         
         let config = SearchConfig::new(search_pattern.pattern).with_regex(search_pattern.is_regex);
@@ -495,7 +497,7 @@ impl TaintEngine {
             .collect();
         
         // 生成搜索 patterns
-        let patterns = InsnAnalyzer::gen_arith_patterns(&reg_values);
+        let patterns = ParsedInsn::gen_arith_patterns(&reg_values);
         
         println!("  → 开始追踪 {} 个源寄存器:", reg_values.len());
         
@@ -504,7 +506,7 @@ impl TaintEngine {
             .enumerate()
             .filter(|(_, ((reg, val), _))| {
                 // 跳过零寄存器和常量值
-                !InsnAnalyzer::is_zero_register(reg) && !InsnAnalyzer::is_constant_value(val)
+                !ParsedInsn::is_zero_register(reg) && !ParsedInsn::is_constant_value(val)
             })
             .filter_map(|(idx, ((reg, _), pattern))| {
                 println!("  [分支 {}] 追踪寄存器: {}", idx + 1, reg);
