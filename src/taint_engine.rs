@@ -3,7 +3,7 @@ use crate::search_service::{SearchService, SearchConfig};
 use crate::insn_analyzer::{InsnType, ParsedInsn};
 use crate::trace_path_tree::TracePathTree;
 use anyhow::Result;
-use std::collections::{HashSet, HashMap};
+use std::collections::HashSet;
 
 const SEP: &str = ";";
 
@@ -19,8 +19,6 @@ pub struct TaintEngine {
     // 字节偏移追踪上下文：记录当前追踪目标的字节范围
     // key: target_name (寄存器名), value: (byte_offset, byte_size)
     current_byte_range: Option<(String, usize, usize)>,
-    // 解析缓存：避免重复解析同一行
-    parse_cache: HashMap<usize, ParsedInsn>,
 }
 
 #[derive(Debug, Clone)]
@@ -29,7 +27,7 @@ pub struct TracePath {
     pub instruction: String,
     pub trace_type: TraceType,
     pub depth: usize,
-    pub sources: Vec<TracePath>,
+    pub sources: Vec<TracePath>, // 溯源
     pub parsed_insn: Option<crate::insn_analyzer::ParsedInsn>,
 }
 
@@ -107,7 +105,6 @@ impl TaintEngine {
             visited: HashSet::new(),
             debug: false,  // 默认关闭调试
             current_byte_range: None,
-            parse_cache: HashMap::new(),
         }
     }
 
@@ -128,26 +125,10 @@ impl TaintEngine {
         }
     }
     
-    /// 获取解析后的指令（带缓存）
-    fn get_parsed_insn(&mut self, line_num: usize) -> Option<ParsedInsn> {
-        // 检查缓存
-        if let Some(cached) = self.parse_cache.get(&line_num) {
-            return Some(cached.clone());
-        }
-        
-        // 获取文本并解析
-        let line_text = self.service.get_line_text(line_num)?;
-        let parsed = ParsedInsn::parse(&line_text);
-        
-        // 存入缓存
-        self.parse_cache.insert(line_num, parsed.clone());
-        
-        Some(parsed)
-    }
+
 
     pub fn trace_backward(&mut self, start_line: usize, target: &str) -> Result<Option<TracePath>> {
         self.visited.clear();
-        self.parse_cache.clear();  // 清空缓存
         println!("\n=== 开始反向追踪: {} 从行{} ===\n", target, start_line + 1);
 
         Ok(self._trace_backward(start_line, target, 0))
@@ -162,8 +143,7 @@ impl TaintEngine {
         let line_text = self.service.get_line_text(line_num)?;
         if depth == 0 { println!("[target line]: {}", line_text); }
 
-        // 使用缓存的解析结果
-        let parsed = self.get_parsed_insn(line_num)?;
+        let parsed = ParsedInsn::parse(&line_text);
 
         let mut path = TracePath {
             line_num,
@@ -275,14 +255,13 @@ impl TaintEngine {
         src_regs: &[String],
         write_offset: usize,
     ) -> bool {
-        // 使用缓存获取解析结果
-        let load_parsed = match self.get_parsed_insn(load_line_num) {
-            Some(p) => p,
+        let load_parsed = match self.service.get_line_text(load_line_num) {
+            Some(text) => ParsedInsn::parse(&text),
             None => return true,
         };
         
-        let store_parsed = match self.get_parsed_insn(store_line_num) {
-            Some(p) => p,
+        let store_parsed = match self.service.get_line_text(store_line_num) {
+            Some(text) => ParsedInsn::parse(&text),
             None => return true,
         };
         
@@ -408,8 +387,8 @@ impl TaintEngine {
         loop {
             let prev = self.service.find_prev(current_line, config.clone())?;
             
-            // 使用缓存获取解析结果
-            let parsed = self.get_parsed_insn(prev.line_number)?;
+            let line_text = self.service.get_line_text(prev.line_number)?;
+            let parsed = ParsedInsn::parse(&line_text);
             
             // 检查是否是store指令并获取信息
             if let Ok((src_regs, write_addr, write_size)) = parsed.get_store_info() {
@@ -454,12 +433,12 @@ impl TaintEngine {
         }
     }
 
-    // 追踪内存写入（使用 ParsedInsn 和缓存）
+    // 追踪内存写入（使用 ParsedInsn）
     fn trace_mem_write(&mut self, line_num: usize, src_regs: &[String], _addr: u64, _size: usize, depth: usize) -> Option<TracePath> {
         let src_reg = src_regs.first()?;
         
-        // 使用缓存获取解析结果
-        let parsed = self.get_parsed_insn(line_num)?;
+        let line_text = self.service.get_line_text(line_num)?;
+        let parsed = ParsedInsn::parse(&line_text);
         
         parsed.read_regs.iter()
             .find(|(r, _)| r == src_reg)
