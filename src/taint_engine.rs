@@ -33,6 +33,7 @@ pub struct TracePath {
 
 impl TracePath {
     /// 打印追踪路径树
+    /// 构造一个树节点
     pub fn print(&self) {
         self.print_with_indent(0);
     }
