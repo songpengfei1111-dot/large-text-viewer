@@ -12,8 +12,8 @@ pub struct AssemblyInstruction {
     pub opcode: String,
     pub operands: String,
     pub read_regs: String,
-    pub mem_read: String,
-    pub mem_write: String,
+    pub mem_detail: String,
+    pub mem_info: String,
     pub write_regs: String,
     pub unknown: String,
 }
@@ -40,8 +40,8 @@ impl AssemblyInstruction {
             opcode: parts.get(3).unwrap_or(&"").to_string(),
             operands: parts.get(4).unwrap_or(&"").to_string(),
             read_regs: parts.get(5).unwrap_or(&"").to_string(),
-            mem_read: parts.get(6).unwrap_or(&"").to_string(),
-            mem_write: parts.get(7).unwrap_or(&"").to_string(),
+            mem_detail: parts.get(6).unwrap_or(&"").to_string(),
+            mem_info: parts.get(7).unwrap_or(&"").to_string(),
             write_regs: parts.get(8).unwrap_or(&"").to_string(),
             unknown: parts.get(9).unwrap_or(&"").to_string(),
         }
@@ -55,8 +55,8 @@ impl AssemblyInstruction {
             &self.opcode,
             &self.operands,
             &self.read_regs,
-            &self.mem_read,
-            &self.mem_write,
+            &self.mem_detail,
+            &self.mem_info,
             &self.write_regs,
             &self.unknown,
         ]

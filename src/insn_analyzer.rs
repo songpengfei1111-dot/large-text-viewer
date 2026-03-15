@@ -42,7 +42,6 @@ impl ParsedInsn {
     /// 从文本行解析指令（一次性解析所有信息）
     pub fn parse(line_text: &str) -> Self {
         let asm = AssemblyInstruction::from_line(line_text);
-        let parts = asm.to_parts();
         
         // 提取指令名称
         let insn_name = asm.opcode.trim().to_string();
@@ -51,11 +50,11 @@ impl ParsedInsn {
         let insn_type = Self::identify_type(&insn_name);
         
         // 提取寄存器信息
-        let read_regs = Self::extract_reg_values_from_parts(&parts, PREFIX_REG_READ);
-        let write_regs = Self::extract_reg_values_from_parts(&parts, PREFIX_REG_WRITE);
+        let read_regs = Self::extract_reg_values(&asm.read_regs, PREFIX_REG_READ);
+        let write_regs = Self::extract_reg_values(&asm.write_regs, PREFIX_REG_WRITE);
         
         // 提取内存访问信息
-        let (mem_addr, mem_size, is_load, is_store) = Self::extract_mem_info(&parts);
+        let (mem_addr, mem_size, is_load, is_store) = Self::extract_mem_info(&asm.mem_detail, &asm.mem_info);
         
         Self {
             raw_text: line_text.to_string(),
@@ -103,11 +102,9 @@ impl ParsedInsn {
         InsnType::Arith
     }
     
-    /// 从已分割的parts中提取寄存器值
-    fn extract_reg_values_from_parts(parts: &[&str], prefix: &str) -> Vec<(String, String)> {
-        parts.iter()
-            .find(|p| p.starts_with(prefix))
-            .and_then(|part| part.strip_prefix(prefix))
+    /// 从寄存器字段中提取值
+    fn extract_reg_values(field: &str, prefix: &str) -> Vec<(String, String)> {
+        field.strip_prefix(prefix)
             .map(|s| {
                 s.split('_')
                     .filter(|pair| pair.contains('='))
@@ -119,26 +116,27 @@ impl ParsedInsn {
     }
     
     /// 提取内存访问信息
-    fn extract_mem_info(parts: &[&str]) -> (Option<u64>, Option<usize>, bool, bool) {
+    fn extract_mem_info(_mem_detail: &str, mem_info: &str) -> (Option<u64>, Option<usize>, bool, bool) {
         let mut mem_addr = None;
         let mut mem_size = None;
         let mut is_load = false;
         let mut is_store = false;
         
-        // 查找 ld__ 或 st__ 标记
-        for part in parts {
-            if let Some(mem_info) = part.strip_prefix(PREFIX_MEM_LOAD) {
-                is_load = true;
-                if let Some((addr, size)) = Self::parse_mem_marker(mem_info) {
-                    mem_addr = Some(addr);
-                    mem_size = Some(size);
-                }
-            } else if let Some(mem_info) = part.strip_prefix(PREFIX_MEM_STORE) {
-                is_store = true;
-                if let Some((addr, size)) = Self::parse_mem_marker(mem_info) {
-                    mem_addr = Some(addr);
-                    mem_size = Some(size);
-                }
+        // 查找 ld__ 标记
+        if let Some(mem_load_info) = mem_info.strip_prefix(PREFIX_MEM_LOAD) {
+            is_load = true;
+            if let Some((addr, size)) = Self::parse_mem_marker(mem_load_info) {
+                mem_addr = Some(addr);
+                mem_size = Some(size);
+            }
+        }
+        
+        // 查找 st__ 标记
+        if let Some(mem_store_info) = mem_info.strip_prefix(PREFIX_MEM_STORE) {
+            is_store = true;
+            if let Some((addr, size)) = Self::parse_mem_marker(mem_store_info) {
+                mem_addr = Some(addr);
+                mem_size = Some(size);
             }
         }
         
@@ -213,7 +211,7 @@ impl ParsedInsn {
             // 如果 write_addr + write_size > addr，则可能覆盖
             // 即 write_addr > addr - write_size
             if addr >= write_size as u64 {
-                let min_write_addr = addr - write_size as u64 + 1;
+                let _min_write_addr = addr - write_size as u64 + 1;
                 
                 // 生成该范围内的对齐地址
                 // ARM64 通常按 1, 2, 4, 8, 16 字节对齐
