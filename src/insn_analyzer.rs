@@ -1,8 +1,7 @@
 // insn_analyzer.rs
 // 指令分析模块：解析指令格式，生成搜索pattern，处理污点传播逻辑
 use anyhow::{Result, anyhow};
-
-const SEP: &str = ";";
+use crate::summery_analyzer::AssemblyInstruction;
 
 // 寄存器字段前缀常量
 const PREFIX_REG_READ: &str = "rr__";
@@ -42,12 +41,11 @@ pub struct ParsedInsn {
 impl ParsedInsn {
     /// 从文本行解析指令（一次性解析所有信息）
     pub fn parse(line_text: &str) -> Self {
-        let parts: Vec<&str> = line_text.split(SEP).collect();
+        let asm = AssemblyInstruction::from_line(line_text);
+        let parts = asm.to_parts();
         
         // 提取指令名称
-        let insn_name = parts.get(3)
-            .map(|s| s.trim().to_string())
-            .unwrap_or_default();
+        let insn_name = asm.opcode.trim().to_string();
         
         // 识别指令类型
         let insn_type = Self::identify_type(&insn_name);

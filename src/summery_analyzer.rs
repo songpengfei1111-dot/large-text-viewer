@@ -2,6 +2,8 @@ use csv::ReaderBuilder;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
+const SEP: char = ';';
+
 #[derive(Debug, Clone)]
 pub struct AssemblyInstruction {
     pub full_addr: String,
@@ -16,6 +18,51 @@ pub struct AssemblyInstruction {
     pub unknown: String,
 }
 
+impl AssemblyInstruction {
+    pub fn from_line(line: &str) -> Self {
+        let parts: Vec<&str> = line.split(SEP).collect();
+        Self::from_parts(&parts)
+    }
+
+    pub fn from_csv_record(record: csv::StringRecord) -> Self {
+        let parts: Vec<&str> = (0..10)
+            .map(|i| record.get(i).unwrap_or(""))
+            .collect();
+        Self::from_parts(&parts)
+    }
+
+    //字段赋值
+    fn from_parts(parts: &[&str]) -> Self {
+        AssemblyInstruction {
+            full_addr: parts.get(0).unwrap_or(&"").to_string(),
+            offset: parts.get(1).unwrap_or(&"").to_string(),
+            hex: parts.get(2).unwrap_or(&"").to_string(),
+            opcode: parts.get(3).unwrap_or(&"").to_string(),
+            operands: parts.get(4).unwrap_or(&"").to_string(),
+            read_regs: parts.get(5).unwrap_or(&"").to_string(),
+            mem_read: parts.get(6).unwrap_or(&"").to_string(),
+            mem_write: parts.get(7).unwrap_or(&"").to_string(),
+            write_regs: parts.get(8).unwrap_or(&"").to_string(),
+            unknown: parts.get(9).unwrap_or(&"").to_string(),
+        }
+    }
+
+    pub fn to_parts(&self) -> Vec<&str> {
+        vec![
+            &self.full_addr,
+            &self.offset,
+            &self.hex,
+            &self.opcode,
+            &self.operands,
+            &self.read_regs,
+            &self.mem_read,
+            &self.mem_write,
+            &self.write_regs,
+            &self.unknown,
+        ]
+    }
+}
+
 pub struct AssemblyAnalyzer {
     instructions: Vec<AssemblyInstruction>,
 }
@@ -28,23 +75,10 @@ impl AssemblyAnalyzer {
             .flexible(false)
             .from_path(path)?;
         
-        let mut instructions = Vec::new();
-        
-        for result in rdr.records() {
-            let record = result?;
-            instructions.push(AssemblyInstruction {
-                full_addr: record.get(0).unwrap_or("").to_string(),
-                offset: record.get(1).unwrap_or("").to_string(),
-                hex: record.get(2).unwrap_or("").to_string(),
-                opcode: record.get(3).unwrap_or("").to_string(),
-                operands: record.get(4).unwrap_or("").to_string(),
-                read_regs: record.get(5).unwrap_or("").to_string(),
-                mem_read: record.get(6).unwrap_or("").to_string(),
-                mem_write: record.get(7).unwrap_or("").to_string(),
-                write_regs: record.get(8).unwrap_or("").to_string(),
-                unknown: record.get(9).unwrap_or("").to_string(),
-            });
-        }
+        let instructions = rdr
+            .records()
+            .map(|result| result.map(AssemblyInstruction::from_csv_record))
+            .collect::<Result<Vec<_>, _>>()?;
         
         Ok(Self { instructions })
     }
@@ -70,17 +104,22 @@ impl AssemblyAnalyzer {
     }
 
     pub fn get_unique_opcodes(&self) -> Vec<String> {
-        let mut set = HashSet::new();
-        for instr in &self.instructions {
-            set.insert(instr.opcode.clone());
-        }
-        let mut vec: Vec<_> = set.into_iter().collect();
-        vec.sort();
-        vec
+        let mut opcodes: Vec<_> = self.instructions
+            .iter()
+            .map(|instr| instr.opcode.clone())
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+        opcodes.sort();
+        opcodes
     }
 
     pub fn get_opcode_count(&self) -> usize {
-        self.get_unique_opcodes().len()
+        self.instructions
+            .iter()
+            .map(|instr| &instr.opcode)
+            .collect::<HashSet<_>>()
+            .len()
     }
 
     pub fn filter_by_opcode(&self, opcode: &str) -> Vec<&AssemblyInstruction> {
