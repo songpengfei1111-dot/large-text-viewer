@@ -251,15 +251,6 @@ impl ParsedInsn {
             _ => addr % size as u64 == 0,
         }
     }
-    
-    /// 生成单个内存读取的搜索pattern
-    pub fn gen_mem_read_pattern(addr: u64, size: usize) -> SearchPattern {
-        SearchPattern {
-            pattern: format!("{}{:x}_", PREFIX_MEM_STORE, addr),
-            is_regex: false,
-            description: format!("查找写入内存地址 0x{:x} 的指令", addr),
-        }
-    }
 
     /// 检查内存访问是否重叠
     pub fn check_memory_overlap(

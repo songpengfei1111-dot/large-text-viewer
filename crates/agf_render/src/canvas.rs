@@ -266,7 +266,7 @@ impl Canvas {
     /// 路由策略：
     /// 1. 从起点 (x1, y1) 向下画竖线到 bend_y
     /// 2. 在 bend_y 行画水平线到 x2
-    /// 3. 从 bend_y 继续向下到终点 (x2, y2)，末尾加箭头 ▼
+    /// 3. 从 bend_y 向上或向下到终点 (x2, y2)，末尾加箭头 ▼
     ///
     /// 所有线条字符使用 `put_merge` 智能合并，避免后画的边覆盖先画的拐角。
     pub fn draw_edge(
@@ -282,8 +282,9 @@ impl Canvas {
         self.current_attr = attr;
 
         if x1 == x2 {
-            // 直线：垂直向下
-            for y in y1..y2 {
+            // 直线：垂直方向（根据 y1 和 y2 的大小决定向上或向下）
+            let (start_y, end_y) = if y1 < y2 { (y1, y2) } else { (y2, y1) };
+            for y in start_y..end_y {
                 if self.goto(x1, y) {
                     self.put_merge('│');
                 }
@@ -308,12 +309,25 @@ impl Canvas {
                 }
             }
             if self.goto(x2, bend_y) {
-                // 右转角：向下走 + 来自左边 = ┐；来自右边 = ┌
-                self.put_merge(if x1 < x2 { '┐' } else { '┌' });
+                // 右转角：根据目标方向选择字符
+                // 如果目标在 bend_y 上方（y2 < bend_y），需要向上的转角
+                // 如果目标在 bend_y 下方（y2 > bend_y），需要向下的转角
+                if y2 < bend_y {
+                    // 向上走：来自左边 = ┘；来自右边 = └
+                    self.put_merge(if x1 < x2 { '┘' } else { '└' });
+                } else {
+                    // 向下走：来自左边 = ┐；来自右边 = ┌
+                    self.put_merge(if x1 < x2 { '┐' } else { '┌' });
+                }
             }
 
-            // 第三段：从 bend_y+1 向下到终点
-            for y in bend_y + 1..y2 {
+            // 第三段：从 bend_y 到终点（可能向上或向下）
+            let (start_y, end_y) = if bend_y < y2 {
+                (bend_y + 1, y2)
+            } else {
+                (y2, bend_y)
+            };
+            for y in start_y..end_y {
                 if self.goto(x2, y) {
                     self.put_merge('│');
                 }

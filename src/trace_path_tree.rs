@@ -83,9 +83,8 @@ impl<T: PartialEq + Clone + std::fmt::Debug> BinaryTree<T> {
 
     fn add_tree_to_graph(tree_node: &Box<TreeNode<T>>, graph: &mut Graph) -> usize {
         let value_str = format!("{:?}", tree_node.value);
-        let lines: Vec<&str> = value_str.lines().collect();
-        let title = if lines.is_empty() { "" } else { lines[0] };
-        let body = if lines.len() > 1 { lines[1..].join("\n") } else { String::new() };
+        let title = "";
+        let body = value_str;
         let node_id = graph.add_node(title, &body);
 
         if let Some(left) = &tree_node.left {
@@ -161,11 +160,25 @@ impl TracePathTree {
         let mut merged_traces = Vec::new();
         Self::merge_linear_chain(trace, &mut merged_traces);
         
-        let root_node = self.create_merged_node(&merged_traces);
+        let is_end = if let Some(last_trace) = merged_traces.last() {
+            last_trace.sources.is_empty()
+        } else {
+            false
+        };
+        
+        let end_reason = if is_end {
+            Some(Self::get_end_reason(merged_traces.last().unwrap()))
+        } else {
+            None
+        };
+        
+        let root_node = self.create_merged_node(&merged_traces, end_reason.as_deref());
         self.tree.add_root(root_node.clone());
         
         if let Some(last_trace) = merged_traces.last() {
-            self.build_children_recursive(&root_node, &last_trace.sources);
+            if !last_trace.sources.is_empty() {
+                self.build_children_recursive(&root_node, &last_trace.sources);
+            }
         }
     }
 
@@ -186,13 +199,35 @@ impl TracePathTree {
             let mut merged_traces = Vec::new();
             Self::merge_linear_chain(child, &mut merged_traces);
             
-            let child_node = self.create_merged_node(&merged_traces);
+            let is_end = if let Some(last_trace) = merged_traces.last() {
+                last_trace.sources.is_empty()
+            } else {
+                false
+            };
+            
+            let end_reason = if is_end {
+                Some(Self::get_end_reason(merged_traces.last().unwrap()))
+            } else {
+                None
+            };
+            
+            let child_node = self.create_merged_node(&merged_traces, end_reason.as_deref());
             let is_left = idx % 2 == 0;
             self.tree.add_child(parent.clone(), child_node.clone(), is_left);
             
             if let Some(last_trace) = merged_traces.last() {
-                self.build_children_recursive(&child_node, &last_trace.sources);
+                if !last_trace.sources.is_empty() {
+                    self.build_children_recursive(&child_node, &last_trace.sources);
+                }
             }
+        }
+    }
+    
+    fn get_end_reason(trace: &TracePath) -> String {
+        match &trace.trace_type {
+            crate::taint_engine::TraceType::Constant => "Constant value or end point".to_string(),
+            crate::taint_engine::TraceType::Unknown => "Unknown instruction type".to_string(),
+            _ => "End of trace".to_string(),
         }
     }
 
@@ -204,12 +239,14 @@ impl TracePathTree {
         format!("{}...", truncated)
     }
 
+    // 用来设定图中显示文本的格式
     fn format_trace_line(trace: &TracePath) -> String {
         let parts: Vec<&str> = trace.instruction.split(';').collect();
         
         let line_num = trace.line_num + 1;
         let insn_name = parts.get(3).unwrap_or(&"").trim();
-        
+        let insn_opt = parts.get(4).unwrap_or(&"").trim();
+
         let mut mem_info = String::new();
         if let Some(parsed) = &trace.parsed_insn {
             if let Some(addr) = parsed.mem_addr {
@@ -217,11 +254,11 @@ impl TracePathTree {
             }
         }
         
-        let line = format!("[{}] {}{}", line_num, insn_name, mem_info);
+        let line = format!("{}:{} {}", line_num, insn_name, insn_opt);
         Self::truncate_text(&line, MAX_LINE_LENGTH)
     }
 
-    fn create_merged_node(&mut self, traces: &[TracePath]) -> TraceNode {
+    fn create_merged_node(&mut self, traces: &[TracePath], end_reason: Option<&str>) -> TraceNode {
         let mut display_text = String::new();
         
         if traces.len() == 1 {
@@ -233,6 +270,13 @@ impl TracePathTree {
                 }
                 display_text.push_str(&Self::format_trace_line(trace));
             }
+        }
+        
+        if let Some(reason) = end_reason {
+            if !display_text.is_empty() {
+                display_text.push('\n');
+            }
+            display_text.push_str(&format!("[end] : {}", reason));
         }
         
         TraceNode {

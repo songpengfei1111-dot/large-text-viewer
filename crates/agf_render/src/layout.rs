@@ -161,8 +161,8 @@ fn assign_layers(g: &mut Graph) {
     let mut layers = vec![0i32; n];
     for &node in &order {
         for &ei in &g.adj_out[node].clone() {
-            if g.edges[ei].dead {
-                continue;
+            if g.edges[ei].dead || g.edges[ei].reversed {
+                continue; // 跳过已删除的边和已反转的回边
             }
             let to = g.edges[ei].to;
             layers[to] = layers[to].max(layers[node] + 1);
@@ -456,11 +456,15 @@ pub fn canvas_size(g: &Graph) -> (i32, i32) {
     // 为回边绕行预留空间
     let n_back = g.back_edges.len() as i32;
     let back_edge_w_margin = n_back * 2 + 4; // 右侧列宽裕量
+    
+    // 总是预留足够的空间，以容纳可能的向下弯曲的边
+    let extra_h = 15; // 预留 15 行的额外空间
+    
     // 底部需要 3 额外行（Step 1: 1行, Step 2 horizontal: 1行, 安全间距: 1行）
     let back_edge_h_margin = if n_back > 0 { 4 } else { V_GAP };
 
     (
         (max_x + back_edge_w_margin).max(80),
-        (max_y + back_edge_h_margin).max(40),
+        (max_y + back_edge_h_margin + extra_h).max(40),
     )
 }

@@ -208,16 +208,6 @@ fn collect_waypoints(g: &Graph, src: NodeId, first_hop: NodeId, real_dst: NodeId
 }
 
 /// 绘制一条完整的边路径（折线）
-///
-/// bend_y 的计算是避免同层多条边在同一水平行重叠的关键。
-/// 对应 rizin 的 `tm->edgectr` / `bendpoint` 逻辑。
-///
-/// 修复前的问题：两条来自同层不同节点的边（如 0x1010→exit 和 0x1030→exit）
-/// 都用 `bend_y = y1 + nth + 1`，y1 相同、nth 相同，导致水平段完全重叠，
-/// 宽边的 `─` 会覆盖窄边的转角字符 `┘`。
-///
-/// 修复方案：bend_y 还要加上源节点在本层的位置偏移 `pos_in_layer`，
-/// 确保不同位置的节点用不同的水平行。
 fn draw_edge_path(
     canvas: &mut Canvas,
     g: &Graph,
@@ -231,23 +221,20 @@ fn draw_edge_path(
         return;
     }
     let attr = Some(edge_attr(color));
-
     let (x1, y1) = waypoints[0];
     let (x2, y2) = *waypoints.last().unwrap();
-
-    // bend_y = 起点下方 (pos_in_layer + nth + 1) 行
-    // pos_in_layer 保证同层不同节点使用不同行，nth 保证同节点多条出边也不重叠
+    
     let pos = g.nodes[src_id].pos_in_layer;
     let bend_offset = pos + nth as i32 + 1;
-    let bend_y = y1 + bend_offset;
-
-    // 如果 bend_y 过大（超过目标顶部），折中处理
-    let effective_bend_y = if bend_y >= y2 - 1 {
-        (y1 + y2) / 2
+    
+    let effective_bend_y: i32;
+    if y2 > y1 {
+        let bend_y = y1 + bend_offset;
+        effective_bend_y = if bend_y >= y2 - 1 { y1 + 1 } else { bend_y };
     } else {
-        bend_y
-    };
-
+        effective_bend_y = y1 + bend_offset.max(4);
+    }
+    
     canvas.draw_edge(x1, y1, x2, y2, effective_bend_y, attr);
 }
 

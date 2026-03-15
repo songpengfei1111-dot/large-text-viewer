@@ -27,7 +27,7 @@ fn main() {
     // 运行实际的污点追踪
     // let _ = taint_engine::test_taint();
     // let _ = taint_engine::test_taint_1();
-    let _ = taint_engine::test_taint_overlap();
+    // let _ = taint_engine::test_taint_overlap();
     
     // 其他测试
     // test_reg::test_reg();
@@ -35,7 +35,7 @@ fn main() {
     // insn_il::test_parse_instruction();
 
     // 测试 agf_render 功能
-    // test_agf_render();
+    test_agf_render();
     // test_binatree_render()  //二叉树测试
 }
 
@@ -67,7 +67,7 @@ fn test_agf_render() {
     );
     let false_branch = g.add_node(
         "false_branch",
-        "mov eax, 0 asdlfjasdfasdkjhjkhkhk",
+        "mov eax, 0 asdlfjasdfasdjhjkhkhk",
     );
     let exit = g.add_node(
         "exit",
@@ -77,7 +77,10 @@ fn test_agf_render() {
     // 添加边
     g.add_edge(entry, true_branch, EdgeColor::False);  // 不跳转
     g.add_edge(entry, false_branch, EdgeColor::True);  // 跳转
-    g.add_edge_uncond(true_branch, exit);
+    // g.add_edge_uncond(true_branch, exit);
+    g.add_edge(true_branch, exit, EdgeColor::False);
+    g.add_edge(true_branch, true_branch, EdgeColor::True);
+
     g.add_edge_uncond(false_branch, exit);
 
 
