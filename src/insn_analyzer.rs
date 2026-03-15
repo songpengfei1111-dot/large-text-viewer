@@ -117,30 +117,19 @@ impl ParsedInsn {
     
     /// 提取内存访问信息
     fn extract_mem_info(_mem_detail: &str, mem_info: &str) -> (Option<u64>, Option<usize>, bool, bool) {
-        let mut mem_addr = None;
-        let mut mem_size = None;
-        let mut is_load = false;
-        let mut is_store = false;
+        let (is_load, marker) = if let Some(marker) = mem_info.strip_prefix(PREFIX_MEM_LOAD) {
+            (true, marker)
+        } else if let Some(marker) = mem_info.strip_prefix(PREFIX_MEM_STORE) {
+            (false, marker)
+        } else {
+            return (None, None, false, false);
+        };
         
-        // 查找 ld__ 标记
-        if let Some(mem_load_info) = mem_info.strip_prefix(PREFIX_MEM_LOAD) {
-            is_load = true;
-            if let Some((addr, size)) = Self::parse_mem_marker(mem_load_info) {
-                mem_addr = Some(addr);
-                mem_size = Some(size);
-            }
-        }
+        let (mem_addr, mem_size) = Self::parse_mem_marker(marker)
+            .map(|(addr, size)| (Some(addr), Some(size)))
+            .unwrap_or((None, None));
         
-        // 查找 st__ 标记
-        if let Some(mem_store_info) = mem_info.strip_prefix(PREFIX_MEM_STORE) {
-            is_store = true;
-            if let Some((addr, size)) = Self::parse_mem_marker(mem_store_info) {
-                mem_addr = Some(addr);
-                mem_size = Some(size);
-            }
-        }
-        
-        (mem_addr, mem_size, is_load, is_store)
+        (mem_addr, mem_size, is_load, !is_load)
     }
     
     /// 解析内存标记 (例如: "6cf01586a0_4" -> (0x6cf01586a0, 4))

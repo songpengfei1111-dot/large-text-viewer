@@ -28,14 +28,14 @@ fn main() {
     // 运行实际的污点追踪
     // let _ = taint_engine::test_taint();
     // let _ = taint_engine::test_taint_1();
-    // let _ = taint_engine::test_taint_overlap();
+    let _ = taint_engine::test_taint_overlap();
 
 
     // 测试 agf_render 功能
     // test_agf_render();
     
     // 测试 summery_analyzer 功能
-    test_summery_analyzer();
+    // test_summery_analyzer();
 }
 
 fn test_summery_analyzer() {
