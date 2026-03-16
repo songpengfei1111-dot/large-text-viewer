@@ -223,7 +223,7 @@ impl CallTree {
             println!("根节点");
         } else {
             let node_prefix = if is_last { "└── " } else { "├── " };
-            println!("{}{}0x{:x} (调用行: {}, 返回行: {})", 
+            println!("{}{}0x{:x} ({},{})",
                 prefix, node_prefix, node.func_addr, node.call_line, node.ret_line);
         }
 
@@ -331,3 +331,26 @@ mod tests {
     }
 }
 
+
+
+pub fn test_build_call_tree() {
+    match AssemblyAnalyzer::new("logs/record_01.csv") {
+        Ok(analyzer) => {
+            let instructions = analyzer.instructions().to_vec();
+            let mut builder = RetBasedCallTreeBuilder::new(instructions);
+            builder.build();
+
+            println!("=== 构建调用树 ===");
+            let call_tree = builder.build_call_tree();
+
+            println!("总节点数: {}", call_tree.get_node_count());
+            println!("最大深度: {}", call_tree.get_max_depth());
+
+            println!("\n调用树结构 (深度限制为 5):");
+            call_tree.print(5);
+        }
+        Err(e) => {
+            eprintln!("错误: 无法读取文件: {}", e);
+        }
+    }
+}
