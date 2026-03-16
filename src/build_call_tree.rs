@@ -53,37 +53,38 @@ impl RetBasedCallTreeBuilder {
         let ret_lines = filter_ret_line_numbers(&self.instructions);
         
         for &ret_line in &ret_lines {
-            let ret_idx = ret_line - 1;
+            let ret_idx = ret_line - 1; //1base转0base
+            let ret_instr = &self.instructions[ret_idx];
             
-            if let Some(ret_instr) = self.instructions.get(ret_idx) {
-                if let Ok(ret_addr) = u64::from_str_radix(&ret_instr.full_addr, 16) {
-                    if let Some(next_instr) = self.instructions.get(ret_idx + 1) {
-                        if let Ok(return_addr) = u64::from_str_radix(&next_instr.full_addr, 16) {
-                            let call_addr = return_addr - 4;
-                            
-                            if let Some((call_line, call_instr)) = self.find_call_instruction_before(call_addr, ret_idx) {
-                                if let Some(target_func_addr) = self.extract_call_target(&call_instr) {
-                                    self.function_calls.push(FunctionCall {
-                                        call_line,
-                                        call_addr,
-                                        target_func_addr,
-                                        ret_line,
-                                        ret_addr,
-                                        return_addr,
-                                    });
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+            let ret_addr = u64::from_str_radix(&ret_instr.offset, 16).unwrap();
+            //对于最后一个ret显然是没有的，跳过即可
+            let Some(next_instr) = self.instructions.get(ret_idx + 1) else { continue };
+            let return_addr = u64::from_str_radix(&next_instr.offset, 16).unwrap();
+            let call_addr = return_addr - 4;
+
+            let Some((call_line, call_instr)) = self.find_call_instruction_before(call_addr, ret_idx) else {
+                println!("err :[{:x},{:x}]",return_addr,call_addr);
+                // 这里是由于开始的函数已经ret完了
+                continue
+            };
+            println!("[{:x},{:x},{}]",return_addr,call_addr,call_line);
+            let Some(target_func_addr) = self.extract_call_target(&call_instr) else { continue };
+
+            self.function_calls.push(FunctionCall {
+                call_line,
+                call_addr,
+                target_func_addr,
+                ret_line,
+                ret_addr,
+                return_addr,
+            });
         }
     }
 
     fn find_call_instruction_before(&self, target_addr: u64, before_idx: usize) -> Option<(usize, AssemblyInstruction)> {
         for i in (0..before_idx).rev() {
             if let Some(instr) = self.instructions.get(i) {
-                if let Ok(addr) = u64::from_str_radix(&instr.full_addr, 16) {
+                if let Ok(addr) = u64::from_str_radix(&instr.offset, 16) {
                     if addr == target_addr {
                         if instr.opcode.starts_with("bl") || instr.opcode.starts_with("blr") {
                             return Some((i + 1, instr.clone()));
@@ -322,7 +323,7 @@ mod tests {
                 println!("最大深度: {}", call_tree.get_max_depth());
                 
                 println!("\n调用树结构 (深度限制为 5):");
-                call_tree.print(5);
+                call_tree.print(10);
             }
             Err(e) => {
                 eprintln!("错误: 无法读取文件: {}", e);
