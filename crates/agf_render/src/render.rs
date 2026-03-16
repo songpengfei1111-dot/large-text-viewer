@@ -227,10 +227,34 @@ fn draw_edge_path(
     let pos = g.nodes[src_id].pos_in_layer;
     let bend_offset = pos + nth as i32 + 1;
     
-    let effective_bend_y: i32;
+    let mut effective_bend_y: i32;
     if y2 > y1 {
         let bend_y = y1 + bend_offset;
         effective_bend_y = if bend_y >= y2 - 1 { y1 + 1 } else { bend_y };
+        
+        // 检查并调整 effective_bend_y，确保它不会穿过任何中间节点
+        let mut attempts = 0;
+        while attempts < 100 {
+            let mut blocked = false;
+            for node in g.nodes.iter().filter(|n| !n.is_dummy) {
+                // 检查 effective_bend_y 是否在当前节点的垂直范围内
+                if effective_bend_y >= node.y && effective_bend_y < node.y + node.h {
+                    blocked = true;
+                    break;
+                }
+            }
+            if !blocked {
+                break;
+            }
+            // 如果被阻塞，尝试下一个可用位置
+            effective_bend_y += 1;
+            // 确保不会超过目标节点的顶部
+            if effective_bend_y >= y2 - 1 {
+                effective_bend_y = y1 + 1;
+                break;
+            }
+            attempts += 1;
+        }
     } else {
         effective_bend_y = y1 + bend_offset.max(4);
     }

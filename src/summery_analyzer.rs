@@ -61,6 +61,28 @@ impl AssemblyInstruction {
             &self.unknown,
         ]
     }
+
+    pub fn get_lr_value(&self) -> Option<u64> {
+        if self.write_regs.contains("lr=") {
+            if let Some(start) = self.write_regs.find("lr=") {
+                let mut lr_part = &self.write_regs[start + 3..];
+                if lr_part.starts_with("0x") {
+                    lr_part = &lr_part[2..];
+                }
+                if let Some(end) = lr_part.find(|c: char| !c.is_ascii_hexdigit()) {
+                    let lr_str = &lr_part[..end];
+                    if let Ok(lr_val) = u64::from_str_radix(lr_str, 16) {
+                        return Some(lr_val);
+                    }
+                } else {
+                    if let Ok(lr_val) = u64::from_str_radix(lr_part, 16) {
+                        return Some(lr_val);
+                    }
+                }
+            }
+        }
+        None
+    }
 }
 
 pub struct AssemblyAnalyzer {
