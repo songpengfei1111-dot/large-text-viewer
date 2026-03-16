@@ -36,6 +36,12 @@ pub struct CallTree {
 }
 
 #[derive(Debug, Clone)]
+pub struct CallContext {
+    pub current_node: CallTreeNode,
+    pub call_chain: Vec<CallTreeNode>,
+}
+
+#[derive(Debug, Clone)]
 pub struct RetBasedCallTreeBuilder {
     instructions: Vec<AssemblyInstruction>,
     pub function_calls: Vec<FunctionCall>,
@@ -264,6 +270,59 @@ impl CallTree {
 
         max_depth
     }
+
+    pub fn get_call_context_by_line(&self, line_number: usize) -> Option<CallContext> {
+        let mut deepest_node_id: Option<u32> = None;
+        let mut max_depth = 0;
+
+        for (id, node) in self.nodes.iter().enumerate() {
+            if node.call_line <= line_number && line_number <= node.ret_line {
+                let depth = self.get_node_depth(id as u32);
+                if depth > max_depth {
+                    max_depth = depth;
+                    deepest_node_id = Some(id as u32);
+                }
+            }
+        }
+
+        deepest_node_id.map(|node_id| {
+            let current_node = self.nodes[node_id as usize].clone();
+            let call_chain = self.get_call_chain(node_id);
+            CallContext {
+                current_node,
+                call_chain,
+            }
+        })
+    }
+
+    fn get_node_depth(&self, node_id: u32) -> usize {
+        let mut depth = 0;
+        let mut current_id = Some(node_id);
+
+        while let Some(id) = current_id {
+            let node = &self.nodes[id as usize];
+            current_id = node.parent_id;
+            if current_id.is_some() {
+                depth += 1;
+            }
+        }
+
+        depth
+    }
+
+    fn get_call_chain(&self, node_id: u32) -> Vec<CallTreeNode> {
+        let mut chain = Vec::new();
+        let mut current_id = Some(node_id);
+
+        while let Some(id) = current_id {
+            let node = self.nodes[id as usize].clone();
+            chain.push(node);
+            current_id = self.nodes[id as usize].parent_id;
+        }
+
+        chain.reverse();
+        chain
+    }
 }
 
 #[cfg(test)]
@@ -324,6 +383,49 @@ mod tests {
                 
                 println!("\n调用树结构 (深度限制为 5):");
                 call_tree.print(10);
+            }
+            Err(e) => {
+                eprintln!("错误: 无法读取文件: {}", e);
+            }
+        }
+    }
+
+    #[test]
+    fn test_get_call_context_by_line() {
+        match AssemblyAnalyzer::new("logs/record_01.csv") {
+            Ok(analyzer) => {
+                let instructions = analyzer.instructions().to_vec();
+                let mut builder = RetBasedCallTreeBuilder::new(instructions);
+                builder.build();
+                
+                let call_tree = builder.build_call_tree();
+                
+                println!("=== 测试根据行号获取调用上下文 ===");
+                
+                if !builder.function_calls.is_empty() {
+                    let first_call = &builder.function_calls[0];
+                    let test_line = first_call.call_line + 1;
+                    
+                    println!("测试行号: {}", test_line);
+                    
+                    if let Some(context) = call_tree.get_call_context_by_line(test_line) {
+                        println!("当前函数: 0x{:x}", context.current_node.func_addr);
+                        println!("调用行: {}, 返回行: {}", context.current_node.call_line, context.current_node.ret_line);
+                        println!("调用链长度: {}", context.call_chain.len());
+                        println!("调用链:");
+                        for (i, node) in context.call_chain.iter().enumerate() {
+                            if i == 0 {
+                                println!("  [{}] 根节点", i);
+                            } else {
+                                println!("  [{}] 0x{:x} ({},{})", i, node.func_addr, node.call_line, node.ret_line);
+                            }
+                        }
+                    } else {
+                        println!("未找到该行号的调用上下文");
+                    }
+                } else {
+                    println!("没有找到函数调用，无法测试");
+                }
             }
             Err(e) => {
                 eprintln!("错误: 无法读取文件: {}", e);
