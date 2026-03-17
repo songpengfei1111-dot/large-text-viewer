@@ -329,6 +329,43 @@ impl ParsedInsn {
             _ => 8,
         }
     }
+
+    /// 计算调整后的内存地址和大小
+    pub fn calculate_adjusted_address(
+        dst_regs: &[String],
+        addr: u64,
+        size: usize,
+        target: &str,
+        current_byte_range: &Option<(String, usize, usize)>,
+    ) -> (u64, usize) {
+        if dst_regs.is_empty() {
+            return (addr, size);
+        }
+
+        if let Some((target_reg, byte_offset, byte_size)) = current_byte_range {
+            if let Some(reg_index) = dst_regs.iter().position(|r| r == target_reg) {
+                let reg_size = Self::get_reg_size(target_reg);
+                let mem_offset = reg_index * reg_size;
+                let new_addr = addr + mem_offset as u64 + *byte_offset as u64;
+                println!("  [字节追踪] 寄存器 {} 在位置 {}, 调整搜索: 0x{:x}[{}] -> 0x{:x}[{}]",
+                         target_reg, reg_index, addr, size, new_addr, *byte_size);
+                return (new_addr, *byte_size);
+            }
+        }
+
+        if dst_regs.len() > 1 {
+            if let Some(reg_index) = dst_regs.iter().position(|r| r == target) {
+                let reg_size = Self::get_reg_size(target);
+                let mem_offset = reg_index * reg_size;
+                let new_addr = addr + mem_offset as u64;
+                println!("  [多寄存器] 寄存器 {} 在位置 {}, 调整搜索: 0x{:x}[{}] -> 0x{:x}[{}]",
+                         target, reg_index, addr, size, new_addr, reg_size);
+                return (new_addr, reg_size);
+            }
+        }
+
+        (addr, size)
+    }
 }
 
 /// 搜索模式

@@ -5,11 +5,7 @@ use anyhow::Result;
 use std::collections::HashSet;
 use agf_render::{Graph, EdgeColor, layout, render_to_stdout};
 
-const SEP: &str = ";";
 const MAX_LINE_LENGTH: usize = 45;
-
-const PREFIX_REG_READ: &str = "rr__";
-const PREFIX_REG_WRITE: &str = "rw__";
 
 pub struct TaintEngine {
     service: SearchService,
@@ -41,22 +37,22 @@ pub struct TaintTreeNode {
 }
 
 impl TaintTreeNode {
-    fn new(
-        line_num: usize,
-        instruction: String,
-        trace_type: TraceType,
-        depth: usize,
-        parsed_insn: Option<ParsedInsn>,
-        node_id: usize,
-    ) -> Self {
+    fn new(line_num: usize, depth: usize, node_id: usize) -> Self {
         Self {
             line_num,
-            instruction,
-            trace_type,
+            instruction: String::new(),
+            trace_type: TraceType::Unknown,
             depth,
             children: Vec::new(),
-            parsed_insn,
+            parsed_insn: None,
             node_id,
+        }
+    }
+
+    fn init_from_service(&mut self, service: &mut SearchService) {
+        if let Some(line_text) = service.get_line_text(self.line_num) {
+            self.instruction = line_text.clone();
+            self.parsed_insn = Some(ParsedInsn::parse(&line_text));
         }
     }
 
@@ -261,26 +257,29 @@ impl TaintEngine {
 
         self.visited.insert(line_num);
 
-        let line_text = self.service.get_line_text(line_num)?;
-        if depth == 0 { println!("[target line]: {}", line_text); }
+        let mut node = TaintTreeNode::new(line_num, depth, tree.next_id());
+        node.init_from_service(&mut self.service);
+        
+        if depth == 0 { 
+            if let Some(line_text) = self.service.get_line_text(line_num) {
+                println!("[target line]: {}", line_text); 
+            }
+        }
 
-        let parsed = ParsedInsn::parse(&line_text);
-
-        let mut node = TaintTreeNode::new(
-            line_num,
-            line_text.clone(),
-            TraceType::Unknown,
-            depth,
-            Some(parsed.clone()),
-            tree.next_id(),
-        );
+        let parsed = node.parsed_insn.as_ref()?;
 
         match parsed.insn_type {
             InsnType::Load => {
                 if let Ok((dst_regs, addr, size)) = parsed.get_load_info() {
                     self.debug_log(&format!("  [Load] 目标寄存器: {:?}, target={}, byte_range={:?}", dst_regs, target, self.current_byte_range));
                     
-                    let (adjusted_addr, adjusted_size) = self.calculate_adjusted_address(&dst_regs, addr, size, target);
+                    let (adjusted_addr, adjusted_size) = ParsedInsn::calculate_adjusted_address(
+                        &dst_regs, 
+                        addr, 
+                        size, 
+                        target, 
+                        &self.current_byte_range
+                    );
                     
                     node.trace_type = TraceType::MemToReg(format!("0x{:x}", adjusted_addr));
                     if let Some(child) = self.trace_mem_read_node(line_num, adjusted_addr, adjusted_size, &dst_regs, depth, tree) {
@@ -325,42 +324,6 @@ impl TaintEngine {
         }
 
         Some(node)
-    }
-
-    fn calculate_adjusted_address(
-        &self,
-        dst_regs: &[String],
-        addr: u64,
-        size: usize,
-        target: &str,
-    ) -> (u64, usize) {
-        if dst_regs.is_empty() {
-            return (addr, size);
-        }
-
-        if let Some((target_reg, byte_offset, byte_size)) = &self.current_byte_range {
-            if let Some(reg_index) = dst_regs.iter().position(|r| r == target_reg) {
-                let reg_size = ParsedInsn::get_reg_size(target_reg);
-                let mem_offset = reg_index * reg_size;
-                let new_addr = addr + mem_offset as u64 + *byte_offset as u64;
-                println!("  [字节追踪] 寄存器 {} 在位置 {}, 调整搜索: 0x{:x}[{}] -> 0x{:x}[{}]",
-                         target_reg, reg_index, addr, size, new_addr, *byte_size);
-                return (new_addr, *byte_size);
-            }
-        }
-
-        if dst_regs.len() > 1 {
-            if let Some(reg_index) = dst_regs.iter().position(|r| r == target) {
-                let reg_size = ParsedInsn::get_reg_size(target);
-                let mem_offset = reg_index * reg_size;
-                let new_addr = addr + mem_offset as u64;
-                println!("  [多寄存器] 寄存器 {} 在位置 {}, 调整搜索: 0x{:x}[{}] -> 0x{:x}[{}]",
-                         target, reg_index, addr, size, new_addr, reg_size);
-                return (new_addr, reg_size);
-            }
-        }
-
-        (addr, size)
     }
 
     fn validate_store_value(
