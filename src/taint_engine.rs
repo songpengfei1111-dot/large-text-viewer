@@ -1,6 +1,7 @@
 // taint_engine.rs
 use crate::search_service::{SearchService, SearchConfig};
 use crate::insn_analyzer::{InsnType, ParsedInsn};
+use crate::tree::{TreeNode, Tree};
 use anyhow::Result;
 use std::collections::HashSet;
 use agf_render::{Graph, EdgeColor, layout, render_to_stdout};
@@ -33,11 +34,10 @@ pub struct TaintTreeNode {
     pub depth: usize,
     pub children: Vec<TaintTreeNode>,
     pub parsed_insn: Option<ParsedInsn>,
-    node_id: usize,
 }
 
 impl TaintTreeNode {
-    fn new(line_num: usize, depth: usize, node_id: usize) -> Self {
+    fn new(line_num: usize, depth: usize) -> Self {
         Self {
             line_num,
             instruction: String::new(),
@@ -45,7 +45,6 @@ impl TaintTreeNode {
             depth,
             children: Vec::new(),
             parsed_insn: None,
-            node_id,
         }
     }
 
@@ -56,18 +55,10 @@ impl TaintTreeNode {
         }
     }
 
-    pub fn add_child(&mut self, child: TaintTreeNode) {
-        self.children.push(child);
-    }
-
-    pub fn add_children(&mut self, children: impl IntoIterator<Item = TaintTreeNode>) {
-        self.children.extend(children);
-    }
-
     pub fn print(&self) {
         self.print_with_indent(0);
     }
-    
+
     fn print_with_indent(&self, indent: usize) {
         let prefix = "  ".repeat(indent);
         let type_str = match &self.trace_type {
@@ -79,30 +70,12 @@ impl TaintTreeNode {
             TraceType::Unknown => "❓ Unknown".to_string(),
         };
         
-        println!("{}[{}] {} | {}", 
-                 prefix, 
-                 self.line_num + 1, 
-                 type_str,
+        println!("{}[{}] {} | {}", prefix, self.line_num + 1, type_str,
                  self.instruction.split(';').take(5).collect::<Vec<_>>().join(";"));
         
         for child in &self.children {
             child.print_with_indent(indent + 1);
         }
-    }
-    
-    pub fn max_depth(&self) -> usize {
-        if self.children.is_empty() {
-            self.depth
-        } else {
-            self.children.iter()
-                .map(|c| c.max_depth())
-                .max()
-                .unwrap_or(self.depth)
-        }
-    }
-    
-    pub fn count_instructions(&self) -> usize {
-        1 + self.children.iter().map(|c| c.count_instructions()).sum::<usize>()
     }
 
     pub fn render(&self) {
@@ -153,26 +126,30 @@ impl TaintTreeNode {
     }
 }
 
+impl TreeNode for TaintTreeNode {
+    fn children_mut(&mut self) -> &mut Vec<Self> {
+        &mut self.children
+    }
+    
+    fn children(&self) -> &[Self] {
+        &self.children
+    }
+    
+    fn depth(&self) -> usize {
+        self.depth
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct TaintTree {
     root: Option<TaintTreeNode>,
-    next_id: usize,
 }
 
 impl TaintTree {
     pub fn new() -> Self {
         Self {
             root: None,
-            next_id: 0,
         }
-    }
-
-    pub fn set_root(&mut self, node: TaintTreeNode) {
-        self.root = Some(node);
-    }
-
-    pub fn root(&self) -> Option<&TaintTreeNode> {
-        self.root.as_ref()
     }
 
     pub fn print(&self) {
@@ -187,18 +164,22 @@ impl TaintTree {
         }
     }
 
-    pub fn max_depth(&self) -> usize {
-        self.root.as_ref().map_or(0, |r| r.max_depth())
-    }
-
     pub fn count_instructions(&self) -> usize {
-        self.root.as_ref().map_or(0, |r| r.count_instructions())
+        self.count_nodes()
+    }
+}
+
+impl Tree<TaintTreeNode> for TaintTree {
+    fn root(&self) -> Option<&TaintTreeNode> {
+        self.root.as_ref()
     }
 
-    fn next_id(&mut self) -> usize {
-        let id = self.next_id;
-        self.next_id += 1;
-        id
+    fn root_mut(&mut self) -> Option<&mut TaintTreeNode> {
+        self.root.as_mut()
+    }
+
+    fn set_root(&mut self, root: TaintTreeNode) {
+        self.root = Some(root);
     }
 }
 
@@ -236,20 +217,14 @@ impl TaintEngine {
     }
 
     pub fn trace_backward(&mut self, start_line: usize, target: &str) -> Result<Option<TaintTree>> {
-        self.trace_backward_tree(start_line, target)
-    }
-
-    pub fn trace_backward_tree(&mut self, start_line: usize, target: &str) -> Result<Option<TaintTree>> {
         self.visited.clear();
         println!("\n=== 开始反向追踪: {} 从行{} ===\n", target, start_line + 1);
 
         let mut tree = TaintTree::new();
-        if let Some(root) = self._trace_backward_node(start_line, target, 0, &mut tree) {
+        Ok(self._trace_backward_node(start_line, target, 0, &mut tree).map(|root| {
             tree.set_root(root);
-            Ok(Some(tree))
-        } else {
-            Ok(None)
-        }
+            tree
+        }))
     }
 
     fn _trace_backward_node(&mut self, line_num: usize, target: &str, depth: usize, tree: &mut TaintTree) -> Option<TaintTreeNode> {
@@ -257,12 +232,12 @@ impl TaintEngine {
 
         self.visited.insert(line_num);
 
-        let mut node = TaintTreeNode::new(line_num, depth, tree.next_id());
+        let mut node = TaintTreeNode::new(line_num, depth);
         node.init_from_service(&mut self.service);
         
-        if depth == 0 { 
+        if depth == 0 {
             if let Some(line_text) = self.service.get_line_text(line_num) {
-                println!("[target line]: {}", line_text); 
+                println!("[target line]: {}", line_text);
             }
         }
 
@@ -274,11 +249,7 @@ impl TaintEngine {
                     self.debug_log(&format!("  [Load] 目标寄存器: {:?}, target={}, byte_range={:?}", dst_regs, target, self.current_byte_range));
                     
                     let (adjusted_addr, adjusted_size) = ParsedInsn::calculate_adjusted_address(
-                        &dst_regs, 
-                        addr, 
-                        size, 
-                        target, 
-                        &self.current_byte_range
+                        &dst_regs, addr, size, target, &self.current_byte_range
                     );
                     
                     node.trace_type = TraceType::MemToReg(format!("0x{:x}", adjusted_addr));
@@ -372,8 +343,7 @@ impl TaintEngine {
         
         match store_parsed.read_regs.iter().find(|(r, _)| r == src_reg) {
             Some((_, actual_val)) if actual_val != expected_value => {
-                println!("  ⚠ 值不匹配: 期望 {}, 实际 {} (寄存器 {})", 
-                         expected_value, actual_val, src_reg);
+                println!("  ⚠ 值不匹配: 期望 {}, 实际 {} (寄存器 {})", expected_value, actual_val, src_reg);
                 println!("  → 继续搜索其他候选...");
                 false
             }
@@ -567,23 +537,6 @@ impl TaintEngine {
                 None
             })
     }
-}
-
-pub fn test_taint() -> anyhow::Result<()> {
-    use large_text_core::file_reader::FileReader;
-
-    let file_path = std::path::PathBuf::from("/Users/bytedance/RustroverProjects/logs/record_01.csv");
-
-    let reader = FileReader::new(file_path, encoding_rs::UTF_8)?;
-    let service = SearchService::new(reader);
-
-    let mut engine = TaintEngine::new(service).with_max_depth(15);
-
-    println!("\n=== 追踪内存地址: ld__6cf01586a8_8 ===\n");
-    if let Some(_tree) = engine.trace_backward(9217, "ld__6cf01586a8_8")? {
-    }
-
-    Ok(())
 }
 
 pub fn test_taint_overlap() -> anyhow::Result<()> {
