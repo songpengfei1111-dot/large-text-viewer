@@ -7,5 +7,6 @@ mod summery_analyzer;
 mod build_call_tree;
 
 fn main() {
-    build_call_tree::test_build_call_tree();
+    // build_call_tree::test_build_call_tree();
+    let _ = taint_engine::test_taint_new_arch();
 }

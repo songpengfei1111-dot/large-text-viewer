@@ -291,6 +291,8 @@ impl CliProcessor {
     }
 }
 
+// 其他的功能函数也在这里管理
+
 /// CLI入口函数
 pub fn run_cli() -> Result<()> {
     let cli = Cli::parse();

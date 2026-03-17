@@ -648,6 +648,10 @@
     <inspection_tool class="RsIncorrectVisibilityRestriction" enabled="false" level="ERROR" enabled_by_default="false" />
     <inspection_tool class="RsIncorrectlyPlacedInlineAttr" enabled="false" level="ERROR" enabled_by_default="false" />
     <inspection_tool class="RsInherentImplDifferentCrate" enabled="false" level="ERROR" enabled_by_default="false" />
+    <inspection_tool class="RsInternalFileMetadata" enabled="false" level="WARNING" enabled_by_default="false" />
+    <inspection_tool class="RsInternalPartlyUnknownType" enabled="false" level="WARNING" enabled_by_default="false" />
+    <inspection_tool class="RsInternalUnexpandedMacro" enabled="false" level="WARNING" enabled_by_default="false" />
+    <inspection_tool class="RsInternalUnknownType" enabled="false" level="WARNING" enabled_by_default="false" />
     <inspection_tool class="RsInvalidBreakContinue" enabled="false" level="ERROR" enabled_by_default="false" />
     <inspection_tool class="RsInvalidCharLiteralLength" enabled="false" level="ERROR" enabled_by_default="false" />
     <inspection_tool class="RsInvalidConstGenericArgument" enabled="false" level="ERROR" enabled_by_default="false" />

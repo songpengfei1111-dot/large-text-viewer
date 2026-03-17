@@ -89,7 +89,7 @@ pub struct SearchService {
 }
 
 impl SearchService {
-    // 组合底层组间，有些api需要结合原子模块 才能使用
+    // 组合底层组件，有些api需要结合原子模块 才能使用
     pub fn new(reader: FileReader) -> Self {
         let reader = Arc::new(reader);
 
