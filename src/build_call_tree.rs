@@ -1,5 +1,10 @@
 use crate::summery_analyzer::{AssemblyInstruction, AssemblyAnalyzer};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+
+fn parse_hex(hex_str: &str) -> Option<u64> {
+    let trimmed = hex_str.trim_start_matches("0x");
+    u64::from_str_radix(trimmed, 16).ok()
+}
 
 #[derive(Debug, Clone)]
 pub struct FunctionCall {
@@ -24,7 +29,6 @@ pub struct CallTreeNode {
 #[derive(Debug, Clone)]
 pub struct CallTree {
     nodes: Vec<CallTreeNode>,
-    node_map: HashMap<u32, usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -33,90 +37,48 @@ pub struct CallContext {
     pub call_chain: Vec<CallTreeNode>,
 }
 
-pub struct CallAnalyzer {
+pub struct FunctionCallAnalyzer {
     instructions: Vec<AssemblyInstruction>,
+    addr_map: HashMap<u64, usize>,
 }
 
-impl CallAnalyzer {
+impl FunctionCallAnalyzer {
     pub fn new(instructions: Vec<AssemblyInstruction>) -> Self {
-        Self { instructions }
-    }
-
-    fn parse_hex(hex_str: &str) -> Option<u64> {
-        let s = hex_str.strip_prefix("0x").unwrap_or(hex_str);
-        u64::from_str_radix(s, 16).ok()
-    }
-
-    fn filter_ret_indices(&self) -> Vec<usize> {
-        self.instructions
-            .iter()
-            .enumerate()
-            .filter(|(_, instr)| instr.opcode.starts_with("ret"))
-            .map(|(i, _)| i)
-            .collect()
-    }
-
-    fn find_call_instruction(&self, target_addr: u64, before_idx: usize) -> Option<(usize, &AssemblyInstruction)> {
-        for i in (0..before_idx).rev() {
-            if let Some(instr) = self.instructions.get(i) {
-                if let Some(addr) = Self::parse_hex(&instr.offset) {
-                    if addr == target_addr && (instr.opcode.starts_with("bl") || instr.opcode.starts_with("blr")) {
-                        return Some((i + 1, instr));
-                    }
-                }
+        let mut addr_map = HashMap::new();
+        for (i, instr) in instructions.iter().enumerate() {
+            if let Some(addr) = parse_hex(&instr.offset) {
+                addr_map.insert(addr, i);
             }
         }
-        None
-    }
-
-    fn extract_call_target(&self, instr: &AssemblyInstruction) -> Option<u64> {
-        if instr.opcode.starts_with("bl") && !instr.opcode.starts_with("blr") {
-            instr.operands.find('(').and_then(|start| {
-                instr.operands[start + 1..].find(')').map(|end| {
-                    Self::parse_hex(&instr.operands[start + 1..start + 1 + end])
-                })
-            }).flatten()
-        } else if instr.opcode.starts_with("blr") {
-            let reg_part = &instr.operands;
-            let key = format!("{}=", reg_part);
-            instr.read_regs.find(&key).map(|eq_pos| {
-                let val_start = eq_pos + key.len();
-                let val_start = if instr.read_regs[val_start..].starts_with("0x") {
-                    val_start + 2
-                } else {
-                    val_start
-                };
-                let val_end = instr.read_regs[val_start..]
-                    .find(|c: char| !c.is_ascii_hexdigit())
-                    .map(|p| val_start + p)
-                    .unwrap_or(instr.read_regs.len());
-                Self::parse_hex(&instr.read_regs[val_start..val_end])
-            }).flatten()
-        } else {
-            None
+        Self {
+            instructions,
+            addr_map,
         }
     }
 
-    pub fn analyze_calls(&self) -> Vec<FunctionCall> {
-        let mut calls = Vec::new();
-        let ret_indices = self.filter_ret_indices();
-
-        for &ret_idx in &ret_indices {
-            let ret_instr = &self.instructions[ret_idx];
-            let Some(ret_addr) = Self::parse_hex(&ret_instr.offset) else { continue };
+    pub fn analyze(&self) -> Vec<FunctionCall> {
+        let mut function_calls = Vec::new();
+        
+        for (ret_idx, ret_instr) in self.instructions.iter().enumerate() {
+            if !ret_instr.opcode.starts_with("ret") {
+                continue;
+            }
+            
+            let Some(ret_addr) = parse_hex(&ret_instr.offset) else { continue };
             let Some(next_instr) = self.instructions.get(ret_idx + 1) else { continue };
-            let Some(return_addr) = Self::parse_hex(&next_instr.offset) else { continue };
+            let Some(return_addr) = parse_hex(&next_instr.offset) else { continue };
             let call_addr = return_addr - 4;
-
+            
             let Some((call_line, call_instr)) = self.find_call_instruction(call_addr, ret_idx) else {
-                println!("err :[{:x},{:x}]", return_addr, call_addr);
+                eprintln!("err :[{:x},{:x}]", return_addr, call_addr);
                 continue;
             };
+            
             println!("[{:x},{:x},{}]", return_addr, call_addr, call_line);
-
-            let Some(target_func_addr) = self.extract_call_target(call_instr) else { continue };
-
-            calls.push(FunctionCall {
+            
+            let Some(target_func_addr) = self.extract_call_target(&call_instr) else { continue };
+            
+            function_calls.push(FunctionCall {
                 call_line,
                 call_addr,
                 target_func_addr,
@@ -125,20 +87,20 @@ impl CallAnalyzer {
                 return_addr,
             });
         }
-
-        calls
+        
+        function_calls
     }
-}
 
-pub struct CallTreeBuilder;
+    pub fn build_call_tree(&self) -> CallTree {
+        let function_calls = self.analyze();
+        Self::build_tree_from_calls(&function_calls)
+    }
 
-impl CallTreeBuilder {
-    pub fn build(calls: &[FunctionCall]) -> CallTree {
-        let mut sorted_calls = calls.to_vec();
+    pub fn build_tree_from_calls(function_calls: &[FunctionCall]) -> CallTree {
+        let mut sorted_calls = function_calls.to_vec();
         sorted_calls.sort_by_key(|call| call.call_line);
 
         let mut nodes = Vec::new();
-        let mut node_map = HashMap::new();
         let mut call_stack: Vec<u32> = Vec::new();
         let mut next_id = 0;
 
@@ -150,15 +112,13 @@ impl CallTreeBuilder {
             parent_id: None,
             children_ids: Vec::new(),
         };
-        node_map.insert(next_id, nodes.len());
         nodes.push(root);
         next_id += 1;
         call_stack.push(0);
 
         for call in &sorted_calls {
             while let Some(&current_id) = call_stack.last() {
-                let current_idx = node_map[&current_id];
-                let current_node = &nodes[current_idx];
+                let current_node = &nodes[current_id as usize];
                 if current_node.ret_line < call.call_line {
                     call_stack.pop();
                 } else {
@@ -178,18 +138,62 @@ impl CallTreeBuilder {
                 parent_id,
                 children_ids: Vec::new(),
             };
-            node_map.insert(child_id, nodes.len());
             nodes.push(child);
 
             if let Some(parent_id) = parent_id {
-                let parent_idx = node_map[&parent_id];
-                nodes[parent_idx].children_ids.push(child_id);
+                nodes[parent_id as usize].children_ids.push(child_id);
             }
 
             call_stack.push(child_id);
         }
 
-        CallTree { nodes, node_map }
+        CallTree { nodes }
+    }
+
+    fn find_call_instruction(&self, target_addr: u64, before_idx: usize) -> Option<(usize, &AssemblyInstruction)> {
+        if let Some(&idx) = self.addr_map.get(&target_addr) {
+            if idx < before_idx {
+                let instr = &self.instructions[idx];
+                if instr.opcode.starts_with("bl") || instr.opcode.starts_with("blr") {
+                    return Some((idx + 1, instr));
+                }
+            }
+        }
+        
+        for i in (0..before_idx).rev() {
+            let instr = &self.instructions[i];
+            if let Some(addr) = parse_hex(&instr.offset) {
+                if addr == target_addr && (instr.opcode.starts_with("bl") || instr.opcode.starts_with("blr")) {
+                    return Some((i + 1, instr));
+                }
+            }
+        }
+        None
+    }
+
+    fn extract_call_target(&self, instr: &AssemblyInstruction) -> Option<u64> {
+        if instr.opcode.starts_with("bl") && !instr.opcode.starts_with("blr") {
+            let operands = &instr.operands;
+            let start = operands.find('(')?;
+            let end = operands.find(')')?;
+            return parse_hex(&operands[start + 1..end]);
+        } else if instr.opcode.starts_with("blr") {
+            let reg_part = &instr.operands;
+            let read_regs = &instr.read_regs;
+            
+            let eq_pos = read_regs.find(&format!("{}=", reg_part))?;
+            let mut val_start = eq_pos + reg_part.len() + 1;
+            if read_regs[val_start..].starts_with("0x") {
+                val_start += 2;
+            }
+            let val_end = read_regs[val_start..]
+                .find(|c: char| !c.is_ascii_hexdigit())
+                .map(|p| val_start + p)
+                .unwrap_or(read_regs.len());
+            
+            return parse_hex(&read_regs[val_start..val_end]);
+        }
+        None
     }
 }
 
@@ -204,8 +208,8 @@ impl CallTree {
             return;
         }
 
-        let node = &self.nodes[self.node_map[&node_id]];
-
+        let node = &self.nodes[node_id as usize];
+        
         if node_id == 0 {
             println!("根节点");
         } else {
@@ -238,7 +242,7 @@ impl CallTree {
     }
 
     fn get_max_depth_recursive(&self, node_id: u32, current_depth: usize) -> usize {
-        let node = &self.nodes[self.node_map[&node_id]];
+        let node = &self.nodes[node_id as usize];
         let mut max_depth = current_depth;
 
         for &child_id in &node.children_ids {
@@ -255,18 +259,18 @@ impl CallTree {
         let mut deepest_node_id: Option<u32> = None;
         let mut max_depth = 0;
 
-        for node in &self.nodes {
+        for (id, node) in self.nodes.iter().enumerate() {
             if node.call_line <= line_number && line_number <= node.ret_line {
-                let depth = self.get_node_depth(node.id);
+                let depth = self.get_node_depth(id as u32);
                 if depth > max_depth {
                     max_depth = depth;
-                    deepest_node_id = Some(node.id);
+                    deepest_node_id = Some(id as u32);
                 }
             }
         }
 
         deepest_node_id.map(|node_id| {
-            let current_node = self.nodes[self.node_map[&node_id]].clone();
+            let current_node = self.nodes[node_id as usize].clone();
             let call_chain = self.get_call_chain(node_id);
             CallContext {
                 current_node,
@@ -280,7 +284,7 @@ impl CallTree {
         let mut current_id = Some(node_id);
 
         while let Some(id) = current_id {
-            let node = &self.nodes[self.node_map[&id]];
+            let node = &self.nodes[id as usize];
             current_id = node.parent_id;
             if current_id.is_some() {
                 depth += 1;
@@ -295,9 +299,9 @@ impl CallTree {
         let mut current_id = Some(node_id);
 
         while let Some(id) = current_id {
-            let node = self.nodes[self.node_map[&id]].clone();
+            let node = self.nodes[id as usize].clone();
             chain.push(node);
-            current_id = self.nodes[self.node_map[&id]].parent_id;
+            current_id = self.nodes[id as usize].parent_id;
         }
 
         chain.reverse();
@@ -305,57 +309,48 @@ impl CallTree {
     }
 }
 
-pub struct CallSummary;
-
-impl CallSummary {
-    pub fn print(calls: &[FunctionCall]) {
-        println!("=== 基于 ret 指令的函数调用分析 ===");
-        println!("总函数调用数: {}", calls.len());
-
-        let mut func_call_count: HashMap<u64, usize> = HashMap::new();
-        for call in calls {
-            *func_call_count.entry(call.target_func_addr).or_insert(0) += 1;
-        }
-
-        println!("\n被调用函数统计 (前20个):");
-        let mut sorted_funcs: Vec<_> = func_call_count.iter().collect();
-        sorted_funcs.sort_by(|a, b| b.1.cmp(a.1));
-
-        for (i, (&addr, &count)) in sorted_funcs.iter().take(20).enumerate() {
-            println!("  {}. 0x{:x}: {} 次", i + 1, addr, count);
-        }
-
-        println!("\n前20个函数调用详情:");
-        for (i, call) in calls.iter().take(20).enumerate() {
-            println!("  {}. 调用行: {} → 函数: 0x{:x} → 返回行: {}",
-                i + 1, call.call_line, call.target_func_addr, call.ret_line);
-        }
+pub fn print_call_summary(function_calls: &[FunctionCall]) {
+    println!("=== 基于 ret 指令的函数调用分析 ===");
+    println!("总函数调用数: {}", function_calls.len());
+    
+    let mut func_call_count: HashMap<u64, usize> = HashMap::new();
+    for call in function_calls {
+        *func_call_count.entry(call.target_func_addr).or_insert(0) += 1;
+    }
+    
+    println!("\n被调用函数统计 (前20个):");
+    let mut sorted_funcs: Vec<_> = func_call_count.iter().collect();
+    sorted_funcs.sort_by(|a, b| b.1.cmp(a.1));
+    
+    for (i, (&addr, &count)) in sorted_funcs.iter().take(20).enumerate() {
+        println!("  {}. 0x{:x}: {} 次", i + 1, addr, count);
+    }
+    
+    println!("\n前20个函数调用详情:");
+    for (i, call) in function_calls.iter().take(20).enumerate() {
+        println!("  {}. 调用行: {} → 函数: 0x{:x} → 返回行: {}",
+            i + 1, call.call_line, call.target_func_addr, call.ret_line);
     }
 }
 
-pub struct RetBasedCallTreeBuilder {
-    analyzer: CallAnalyzer,
-    pub function_calls: Vec<FunctionCall>,
-}
-
-impl RetBasedCallTreeBuilder {
-    pub fn new(instructions: Vec<AssemblyInstruction>) -> Self {
-        Self {
-            analyzer: CallAnalyzer::new(instructions),
-            function_calls: Vec::new(),
+pub fn test_build_call_tree() {
+    match AssemblyAnalyzer::new("logs/record_01.csv") {
+        Ok(analyzer) => {
+            let instructions = analyzer.instructions().to_vec();
+            let analyzer = FunctionCallAnalyzer::new(instructions);
+            
+            println!("=== 构建调用树 ===");
+            let call_tree = analyzer.build_call_tree();
+            
+            println!("总节点数: {}", call_tree.get_node_count());
+            println!("最大深度: {}", call_tree.get_max_depth());
+            
+            println!("\n调用树结构 (深度限制为 5):");
+            call_tree.print(5);
         }
-    }
-
-    pub fn build(&mut self) {
-        self.function_calls = self.analyzer.analyze_calls();
-    }
-
-    pub fn print_summary(&self) {
-        CallSummary::print(&self.function_calls);
-    }
-
-    pub fn build_call_tree(&self) -> CallTree {
-        CallTreeBuilder::build(&self.function_calls)
+        Err(e) => {
+            eprintln!("错误: 无法读取文件: {}", e);
+        }
     }
 }
 
@@ -364,38 +359,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_filter_ret_from_record_01() {
-        match AssemblyAnalyzer::new("logs/record_01.csv") {
-            Ok(analyzer) => {
-                let instructions = analyzer.instructions();
-                let call_analyzer = CallAnalyzer::new(instructions.to_vec());
-                let ret_indices = call_analyzer.filter_ret_indices();
-
-                println!("=== record_01.csv 中的 ret 指令行号 ===");
-                println!("总 ret 指令数量: {}", ret_indices.len());
-
-                println!("\n前 20 个 ret 指令的行号:");
-                for &idx in ret_indices.iter().take(20) {
-                    let line_num = idx + 1;
-                    if let Some(instr) = instructions.get(idx) {
-                        println!("  行号 {}: {} {}", line_num, instr.opcode, instr.operands);
-                    }
-                }
-            }
-            Err(e) => {
-                eprintln!("错误: 无法读取文件: {}", e);
-            }
-        }
-    }
-
-    #[test]
     fn test_ret_based_call_tree() {
         match AssemblyAnalyzer::new("logs/record_01.csv") {
             Ok(analyzer) => {
                 let instructions = analyzer.instructions().to_vec();
-                let mut builder = RetBasedCallTreeBuilder::new(instructions);
-                builder.build();
-                builder.print_summary();
+                let analyzer = FunctionCallAnalyzer::new(instructions);
+                let function_calls = analyzer.analyze();
+                print_call_summary(&function_calls);
             }
             Err(e) => {
                 eprintln!("错误: 无法读取文件: {}", e);
@@ -408,15 +378,15 @@ mod tests {
         match AssemblyAnalyzer::new("logs/record_01.csv") {
             Ok(analyzer) => {
                 let instructions = analyzer.instructions().to_vec();
-                let mut builder = RetBasedCallTreeBuilder::new(instructions);
-                builder.build();
-
+                let analyzer = FunctionCallAnalyzer::new(instructions);
+                let function_calls = analyzer.analyze();
+                
                 println!("=== 构建调用树 ===");
-                let call_tree = builder.build_call_tree();
-
+                let call_tree = FunctionCallAnalyzer::build_tree_from_calls(&function_calls);
+                
                 println!("总节点数: {}", call_tree.get_node_count());
                 println!("最大深度: {}", call_tree.get_max_depth());
-
+                
                 println!("\n调用树结构 (深度限制为 5):");
                 call_tree.print(10);
             }
@@ -431,19 +401,20 @@ mod tests {
         match AssemblyAnalyzer::new("logs/record_01.csv") {
             Ok(analyzer) => {
                 let instructions = analyzer.instructions().to_vec();
-                let mut builder = RetBasedCallTreeBuilder::new(instructions);
-                builder.build();
-
-                let call_tree = builder.build_call_tree();
-
+                let analyzer = FunctionCallAnalyzer::new(instructions);
+                let function_calls = analyzer.analyze();
+                
+                let call_tree = FunctionCallAnalyzer::build_tree_from_calls(&function_calls);
+                
                 println!("=== 测试根据行号获取调用上下文 ===");
-
-                if !builder.function_calls.is_empty() {
-                    let first_call = &builder.function_calls[0];
-                    let test_line = first_call.call_line + 1;
+                
+                if !function_calls.is_empty() {
+                    let first_call = &function_calls[0];
+                    // let test_line = first_call.call_line + 1;
+                    let test_line = 6666;
 
                     println!("测试行号: {}", test_line);
-
+                    
                     if let Some(context) = call_tree.get_call_context_by_line(test_line) {
                         println!("当前函数: 0x{:x}", context.current_node.func_addr);
                         println!("调用行: {}, 返回行: {}", context.current_node.call_line, context.current_node.ret_line);
@@ -466,28 +437,6 @@ mod tests {
             Err(e) => {
                 eprintln!("错误: 无法读取文件: {}", e);
             }
-        }
-    }
-}
-
-pub fn test_build_call_tree() {
-    match AssemblyAnalyzer::new("logs/record_01.csv") {
-        Ok(analyzer) => {
-            let instructions = analyzer.instructions().to_vec();
-            let mut builder = RetBasedCallTreeBuilder::new(instructions);
-            builder.build();
-
-            println!("=== 构建调用树 ===");
-            let call_tree = builder.build_call_tree();
-
-            println!("总节点数: {}", call_tree.get_node_count());
-            println!("最大深度: {}", call_tree.get_max_depth());
-
-            println!("\n调用树结构 (深度限制为 5):");
-            call_tree.print(5);
-        }
-        Err(e) => {
-            eprintln!("错误: 无法读取文件: {}", e);
         }
     }
 }
