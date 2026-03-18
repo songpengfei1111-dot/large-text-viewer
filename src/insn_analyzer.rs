@@ -2,8 +2,6 @@
 // 指令分析模块：解析指令格式，生成搜索pattern，处理污点传播逻辑
 use anyhow::{Result, anyhow};
 
-const SEP: char = ';';
-
 // 常见的内存访问大小（字节）
 const COMMON_MEM_SIZES: &[usize] = &[16, 8, 4, 2, 1];
 
@@ -32,7 +30,7 @@ pub struct ParsedInsn {
     pub write_regs_raw: String,
     pub unknown: String,
     
-    // 解析后的信息
+    // 指令的分类
     pub insn_type: InsnType,
     
     // 寄存器信息
@@ -42,14 +40,15 @@ pub struct ParsedInsn {
     // 内存访问信息
     pub mem_addr: Option<u64>,
     pub mem_size: Option<usize>,
-    pub is_load: bool,
-    pub is_store: bool,
+    pub mem_access_type: u8, // 0: 无, 1: load, 2: store
+
+    // 可能的内存地址
 }
 
 impl ParsedInsn {
     /// 从文本行解析指令（一次性解析所有信息）
     pub fn parse(line_text: &str) -> Self {
-        let parts: Vec<&str> = line_text.split(SEP).collect();
+        let parts: Vec<&str> = line_text.split(';').collect();
         
         let full_addr = parts.get(0).unwrap_or(&"").to_string();
         let offset = parts.get(1).unwrap_or(&"").to_string();
@@ -65,7 +64,7 @@ impl ParsedInsn {
         let insn_type = Self::identify_type(&opcode);
         let read_regs = Self::extract_reg_values(&read_regs_raw, "rr__");
         let write_regs = Self::extract_reg_values(&write_regs_raw, "rw__");
-        let (mem_addr, mem_size, is_load, is_store) = Self::extract_mem_info(&mem_detail, &mem_info);
+        let (mem_addr, mem_size, mem_access_type) = Self::extract_mem_info(&mem_detail, &mem_info);
         
         Self {
             raw_text: line_text.to_string(),
@@ -84,8 +83,7 @@ impl ParsedInsn {
             write_regs,
             mem_addr,
             mem_size,
-            is_load,
-            is_store,
+            mem_access_type,
         }
     }
     
@@ -136,20 +134,15 @@ impl ParsedInsn {
     }
     
     /// 提取内存访问信息
-    fn extract_mem_info(_mem_detail: &str, mem_info: &str) -> (Option<u64>, Option<usize>, bool, bool) {
-        let (is_load, marker) = if let Some(marker) = mem_info.strip_prefix("ld__") {
-            (true, marker)
-        } else if let Some(marker) = mem_info.strip_prefix("st__") {
-            (false, marker)
-        } else {
-            return (None, None, false, false);
+    fn extract_mem_info(_mem_detail: &str, mem_info: &str) -> (Option<u64>, Option<usize>, u8) {
+        let (mem_access_type, marker) = match () {
+            _ if mem_info.starts_with("ld__") => (1, &mem_info[4..]),
+            _ if mem_info.starts_with("st__") => (2, &mem_info[4..]),
+            _ => return (None, None, 0),
         };
-        
-        let (mem_addr, mem_size) = Self::parse_mem_marker(marker)
-            .map(|(addr, size)| (Some(addr), Some(size)))
-            .unwrap_or((None, None));
-        
-        (mem_addr, mem_size, is_load, !is_load)
+
+        let (mem_addr, mem_size) = Self::parse_mem_marker(marker).unzip();
+        (mem_addr, mem_size, mem_access_type)
     }
     
     /// 解析内存标记 (例如: "6cf01586a0_4" -> (0x6cf01586a0, 4))
