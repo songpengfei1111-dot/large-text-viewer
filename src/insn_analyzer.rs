@@ -10,7 +10,9 @@ const COMMON_MEM_SIZES: &[usize] = &[16, 8, 4, 2, 1];
 pub enum InsnType {
     Load,       // 内存加载指令 (mem2reg): ldr, ldp, ldur等
     Store,      // 内存存储指令 (reg2mem): str, stp, stur等
-    Arith,      // 算术/逻辑/分支/传递等所有其他指令
+    Arith,      // 算术/分支/寄存器类型变化（q0 = x1,x2）
+    Other,      // 数据仅在reg间传递 的所有其他指令
+
 }
 
 /// 解析后的指令结构体 - 一次解析，多次访问
@@ -21,66 +23,52 @@ pub struct ParsedInsn {
     // 原始CSV字段
     pub full_addr: String,
     pub offset: String,
-    pub hex: String,
+    pub asm: String,
     pub opcode: String,
     pub operands: String,
     pub read_regs_raw: String,
     pub mem_detail: String,
     pub mem_info: String,
     pub write_regs_raw: String,
-    pub unknown: String,
-    
+    pub strvis: String,
     // 指令的分类
     pub insn_type: InsnType,
-    
     // 寄存器信息
     pub read_regs: Vec<(String, String)>,   // (寄存器名, 值)
     pub write_regs: Vec<(String, String)>,  // (寄存器名, 值)
-    
     // 内存访问信息
     pub mem_addr: Option<u64>,
     pub mem_size: Option<usize>,
     pub mem_access_type: u8, // 0: 无, 1: load, 2: store
-
     // 可能的内存地址
+
 }
 
 impl ParsedInsn {
     /// 从文本行解析指令（一次性解析所有信息）
     pub fn parse(line_text: &str) -> Self {
         let parts: Vec<&str> = line_text.split(';').collect();
-        
-        let full_addr = parts.get(0).unwrap_or(&"").to_string();
-        let offset = parts.get(1).unwrap_or(&"").to_string();
-        let hex = parts.get(2).unwrap_or(&"").to_string();
-        let opcode = parts.get(3).unwrap_or(&"").to_string();
-        let operands = parts.get(4).unwrap_or(&"").to_string();
-        let read_regs_raw = parts.get(5).unwrap_or(&"").to_string();
-        let mem_detail = parts.get(6).unwrap_or(&"").to_string();
-        let mem_info = parts.get(7).unwrap_or(&"").to_string();
-        let write_regs_raw = parts.get(8).unwrap_or(&"").to_string();
-        let unknown = parts.get(9).unwrap_or(&"").to_string();
-        
-        let insn_type = Self::identify_type(&opcode);
-        let read_regs = Self::extract_reg_values(&read_regs_raw, "rr__");
-        let write_regs = Self::extract_reg_values(&write_regs_raw, "rw__");
+        // 从csv中提取原始字段
+        let [full_addr, offset, asm, opcode, operands, read_regs_raw, mem_detail, mem_info, write_regs_raw, strvis] =
+            std::array::from_fn(|i| parts.get(i).unwrap_or(&"").to_string());
+        // 提取mem信息
         let (mem_addr, mem_size, mem_access_type) = Self::extract_mem_info(&mem_detail, &mem_info);
-        
+        // 结构体赋值
         Self {
             raw_text: line_text.to_string(),
             full_addr,
             offset,
-            hex,
-            opcode,
+            asm,
+            opcode: opcode.clone(),
             operands,
-            read_regs_raw,
+            read_regs_raw: read_regs_raw.clone(),
             mem_detail,
-            mem_info,
-            write_regs_raw,
-            unknown,
-            insn_type,
-            read_regs,
-            write_regs,
+            mem_info: mem_info.clone(),
+            write_regs_raw: write_regs_raw.clone(),
+            strvis,
+            insn_type: Self::identify_type(&opcode),
+            read_regs: Self::extract_reg_values(&read_regs_raw, "rr__"),
+            write_regs: Self::extract_reg_values(&write_regs_raw, "rw__"),
             mem_addr,
             mem_size,
             mem_access_type,
@@ -88,36 +76,32 @@ impl ParsedInsn {
     }
     
     /// 识别指令类型（内部方法）
+    // fn identify_type(insn_name: &str) -> InsnType {
+    //     let insn = insn_name.to_lowercase();
+    //
+    //     let type_map: &[(&[&str], InsnType)] = &[
+    //         // Load 指令
+    //         (&["ldr", "ldp", "ldur", "ldar"], InsnType::Load),
+    //         // Store 指令
+    //         (&["str", "stp", "stur", "stlr"], InsnType::Store),
+    //         // Arith 指令：算术、逻辑、分支、传递等
+    //         (&["mov", "mvn", "add", "sub", "mul", "div", "neg", "adc", "sbc",
+    //            "and", "orr", "eor", "bic", "orn", "eon",
+    //            "b", "b.", "cbz", "cbnz", "tbz", "tbnz",
+    //            "cmp", "cmn", "tst", "asr", "lsl", "lsr", "ror",
+    //            "madd", "msub", "smull", "umull", "sdiv", "udiv"], InsnType::Arith),
+    //     ];
+    //
+    //     // 未匹配的指令默认归类为 Arith
+    //     InsnType::Arith
+    // }
+
     fn identify_type(insn_name: &str) -> InsnType {
-        let insn = insn_name.to_lowercase();
-        
-        let type_map: &[(&[&str], InsnType)] = &[
-            // Load 指令
-            (&["ldr", "ldp", "ldur", "ldar"], InsnType::Load),
-            // Store 指令
-            (&["str", "stp", "stur", "stlr"], InsnType::Store),
-            // Arith 指令：算术、逻辑、分支、传递等
-            (&["mov", "mvn", "add", "sub", "mul", "div", "neg", "adc", "sbc",
-               "and", "orr", "eor", "bic", "orn", "eon",
-               "b", "b.", "cbz", "cbnz", "tbz", "tbnz",
-               "cmp", "cmn", "tst", "asr", "lsl", "lsr", "ror",
-               "madd", "msub", "smull", "umull", "sdiv", "udiv"], InsnType::Arith),
-        ];
-        
-        for (prefixes, insn_type) in type_map {
-            if prefixes.iter().any(|prefix| {
-                if *prefix == "b." {
-                    insn.starts_with("b.")  // 特殊处理 b.cond
-                } else {
-                    insn.starts_with(prefix)
-                }
-            }) {
-                return insn_type.clone();
-            }
+        match insn_name.to_lowercase().as_str() {
+            s if s.starts_with("ld") => InsnType::Load,
+            s if s.starts_with("st") => InsnType::Store,
+            _ => InsnType::Arith,
         }
-        
-        // 未匹配的指令默认归类为 Arith
-        InsnType::Arith
     }
     
     /// 从寄存器字段中提取值
