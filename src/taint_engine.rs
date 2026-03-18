@@ -48,6 +48,8 @@ impl TaintTreeNode {
         }
     }
 
+
+
     fn init_from_service(&mut self, service: &mut SearchService) {
         if let Some(line_text) = service.get_line_text(self.line_num) {
             self.instruction = line_text.clone();
@@ -189,6 +191,9 @@ impl Default for TaintTree {
     }
 }
 
+// TODO 新建shadow_mem；shadow_reg机制，隐线追踪mem区间
+
+
 impl TaintEngine {
     pub fn new(service: SearchService) -> Self {
         Self {
@@ -264,6 +269,21 @@ impl TaintEngine {
                     node.add_child(child);
                 }
             }
+            InsnType::Other => {
+                if parsed.read_regs.is_empty() || parsed.write_regs.is_empty() {
+                    println!("终点/常量");
+                    node.trace_type = TraceType::Constant;
+                } else {
+                    println!("[Other] 数据转移不分支");
+                    let (_src_reg, value) = &parsed.read_regs[0];
+                    let dst_reg = _src_reg;
+                    // let (dst_reg, _) = &parsed.write_regs[0];
+                    node.trace_type = TraceType::RegToReg(dst_reg.clone());
+                    if let Some(child) = self.trace_reg_transfer_node(line_num, dst_reg, value, depth, tree) {
+                        node.add_child(child);
+                    }
+                }
+            }
             InsnType::Arith => {
                 if parsed.read_regs.is_empty() {
                     println!("终点/常量");
@@ -290,6 +310,7 @@ impl TaintEngine {
                     }
                 }
             }
+
         }
 
         Some(node)
@@ -450,7 +471,7 @@ impl TaintEngine {
         let search_pattern = ParsedInsn::gen_reg_read_pattern(reg, _value);
         println!("[reg2reg]: {}", search_pattern.pattern);
         
-        let config = SearchConfig::new(search_pattern.pattern).with_regex(search_pattern.is_regex);
+        let config = SearchConfig::new(search_pattern.pattern).with_regex(true);
         self.find_and_trace_node(line_num, &config, reg, depth, tree)
     }
 

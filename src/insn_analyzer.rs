@@ -1,6 +1,7 @@
 // insn_analyzer.rs
 // 指令分析模块：解析指令格式，生成搜索pattern，处理污点传播逻辑
 use anyhow::{Result, anyhow};
+use egui::debug_text::print;
 
 // 常见的内存访问大小（字节）
 const COMMON_MEM_SIZES: &[usize] = &[16, 8, 4, 2, 1];
@@ -51,12 +52,14 @@ impl ParsedInsn {
         let [full_addr, offset, asm, opcode, operands, read_regs_raw, mem_detail, mem_info, write_regs_raw, strvis] =
             std::array::from_fn(|i| parts.get(i).unwrap_or(&"").to_string());
         // 提取mem信息
-        let (mem_addr, mem_size, mem_access_type) = Self::extract_mem_info(&mem_detail, &mem_info);
+        let (mem_addr, mem_size, mem_access_type) = Self::extract_mem_info(&mem_info);
         // 获取r/w 的寄存器
-        let read_regs = Self::extract_reg_values(&read_regs_raw, "rr__");
-        let write_regs = Self::extract_reg_values(&write_regs_raw, "rw__");
+        let read_regs = Self::extract_reg_values(&read_regs_raw);
+        let write_regs = Self::extract_reg_values(&write_regs_raw);
         // 判断此条指令的类型
         let insn_type = Self::identify_type(&opcode,&read_regs,&write_regs);
+        // 通过insn_type生成搜索下一步的 addr/reg 内存/寄存器 正则表达式；用到shadow_mem_reg
+
         // 结构体赋值
         Self {
             raw_text: line_text.to_string(),
@@ -97,48 +100,36 @@ impl ParsedInsn {
         }
     }
 
-    
+
     /// 从寄存器字段中提取值
-    fn extract_reg_values(field: &str, prefix: &str) -> Vec<(String, String)> {
-        field.strip_prefix(prefix)
-            .map(|s| {
-                s.split('_')
-                    .filter(|pair| pair.contains('='))
-                    .filter_map(|pair| pair.split_once('='))
-                    .map(|(reg, val)| (reg.to_string(), val.to_string()))
-                    .collect()
-            })
-            .unwrap_or_default()
+    /// "“ -> []
+    /// rr__x9=0x6f1c4518cf -> ((x9,0x6f1c4518cf))
+    /// rr__w22=0x1_w23=0x2 -> ((w22,0x1),(w23,0x2))
+    fn extract_reg_values(field: &str) -> Vec<(String, String)> {
+        if field.is_empty() { return vec![]; }
+
+        field[4..]
+            .split('_')
+            .filter_map(|pair| pair.split_once('='))
+            .map(|(reg, val)| (reg.to_string(), val.to_string()))
+            .collect()
     }
     
-    /// 提取内存访问信息
-    fn extract_mem_info(_mem_detail: &str, mem_info: &str) -> (Option<u64>, Option<usize>, u8) {
-        let (mem_access_type, marker) = match () {
+    /// 提取内存访问信息 ld__6cf01586a0_4
+    fn extract_mem_info(mem_info: &str) -> (Option<u64>, Option<usize>, u8) {
+        let (mem_access_type, mem_seg) = match () {
             _ if mem_info.starts_with("ld__") => (1, &mem_info[4..]),
             _ if mem_info.starts_with("st__") => (2, &mem_info[4..]),
             _ => return (None, None, 0),
         };
 
-        let (mem_addr, mem_size) = Self::parse_mem_marker(marker).unzip();
+        let mut parts = mem_seg.split('_');
+        let mem_addr = u64::from_str_radix(parts.next().unwrap(), 16).ok();
+        let mem_size = parts.next().unwrap().parse().ok();
+
         (mem_addr, mem_size, mem_access_type)
     }
-    
-    /// 解析内存标记 (例如: "6cf01586a0_4" -> (0x6cf01586a0, 4))
-    fn parse_mem_marker(marker: &str) -> Option<(u64, usize)> {
-        let parts: Vec<&str> = marker.split('_').collect();
-        if parts.len() < 2 {
-            return None;
-        }
-        
-        let addr_str = parts[parts.len() - 2];
-        let size_str = parts[parts.len() - 1];
-        
-        let addr = u64::from_str_radix(addr_str, 16).ok()?;
-        let size = size_str.parse::<usize>().ok()?;
-        
-        Some((addr, size))
-    }
-    
+
     /// 获取读取的寄存器列表（仅名称）
     pub fn get_read_reg_names(&self) -> Vec<String> {
         self.read_regs.iter().map(|(reg, _)| reg.clone()).collect()
@@ -165,7 +156,7 @@ impl ParsedInsn {
         Ok((self.get_read_reg_names(), addr, size))
     }
     
-    /// 生成内存读取的搜索pattern列表（按优先级排序）
+    /// 生成内存读取的搜索pattern列表（按优先级排序）TODO 重写这里的逻辑
     pub fn gen_mem_read_patterns(addr: u64, size: usize) -> Vec<SearchPattern> {
         let mut patterns = Vec::new();
         
@@ -261,7 +252,8 @@ impl ParsedInsn {
 
     /// 生成寄存器读取的搜索pattern
     pub fn gen_reg_read_pattern(reg: &str, value: &str) -> SearchPattern {
-        let pattern = format!("rw__{}={}", reg, value);
+        let reg_num = reg.trim_start_matches(|c: char| !c.is_numeric());
+        let pattern = format!("rw_.*{}={}", reg_num, value);
         
         SearchPattern {
             pattern: pattern.clone(),
