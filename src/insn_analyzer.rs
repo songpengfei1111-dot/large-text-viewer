@@ -12,7 +12,6 @@ pub enum InsnType {
     Store,      // 内存存储指令 (reg2mem): str, stp, stur等
     Arith,      // 算术/分支/寄存器类型变化（q0 = x1,x2）
     Other,      // 数据仅在reg间传递 的所有其他指令
-
 }
 
 /// 解析后的指令结构体 - 一次解析，多次访问
@@ -53,22 +52,27 @@ impl ParsedInsn {
             std::array::from_fn(|i| parts.get(i).unwrap_or(&"").to_string());
         // 提取mem信息
         let (mem_addr, mem_size, mem_access_type) = Self::extract_mem_info(&mem_detail, &mem_info);
+        // 获取r/w 的寄存器
+        let read_regs = Self::extract_reg_values(&read_regs_raw, "rr__");
+        let write_regs = Self::extract_reg_values(&write_regs_raw, "rw__");
+        // 判断此条指令的类型
+        let insn_type = Self::identify_type(&opcode,&read_regs,&write_regs);
         // 结构体赋值
         Self {
             raw_text: line_text.to_string(),
             full_addr,
             offset,
             asm,
-            opcode: opcode.clone(),
+            opcode,
             operands,
-            read_regs_raw: read_regs_raw.clone(),
+            read_regs_raw,
             mem_detail,
-            mem_info: mem_info.clone(),
-            write_regs_raw: write_regs_raw.clone(),
+            mem_info,
+            write_regs_raw,
             strvis,
-            insn_type: Self::identify_type(&opcode),
-            read_regs: Self::extract_reg_values(&read_regs_raw, "rr__"),
-            write_regs: Self::extract_reg_values(&write_regs_raw, "rw__"),
+            insn_type,
+            read_regs,
+            write_regs,
             mem_addr,
             mem_size,
             mem_access_type,
@@ -76,33 +80,23 @@ impl ParsedInsn {
     }
     
     /// 识别指令类型（内部方法）
-    // fn identify_type(insn_name: &str) -> InsnType {
-    //     let insn = insn_name.to_lowercase();
-    //
-    //     let type_map: &[(&[&str], InsnType)] = &[
-    //         // Load 指令
-    //         (&["ldr", "ldp", "ldur", "ldar"], InsnType::Load),
-    //         // Store 指令
-    //         (&["str", "stp", "stur", "stlr"], InsnType::Store),
-    //         // Arith 指令：算术、逻辑、分支、传递等
-    //         (&["mov", "mvn", "add", "sub", "mul", "div", "neg", "adc", "sbc",
-    //            "and", "orr", "eor", "bic", "orn", "eon",
-    //            "b", "b.", "cbz", "cbnz", "tbz", "tbnz",
-    //            "cmp", "cmn", "tst", "asr", "lsl", "lsr", "ror",
-    //            "madd", "msub", "smull", "umull", "sdiv", "udiv"], InsnType::Arith),
-    //     ];
-    //
-    //     // 未匹配的指令默认归类为 Arith
-    //     InsnType::Arith
-    // }
+    fn identify_type(
+        insn_name: &str,
+        read_regs: &[(String, String)],
+        write_regs: &[(String, String)]
+    ) -> InsnType {
+        let insn = insn_name.to_lowercase();
 
-    fn identify_type(insn_name: &str) -> InsnType {
-        match insn_name.to_lowercase().as_str() {
+        match insn.as_str() {
             s if s.starts_with("ld") => InsnType::Load,
             s if s.starts_with("st") => InsnType::Store,
+            // 如果rr和rw都为1且相等，那么认为是只数据转移不分支，即使数据变化
+            _ if read_regs.len() == 1 && write_regs.len() == 1 => InsnType::Other,
+            // 这种情况是产生了数据分支
             _ => InsnType::Arith,
         }
     }
+
     
     /// 从寄存器字段中提取值
     fn extract_reg_values(field: &str, prefix: &str) -> Vec<(String, String)> {
