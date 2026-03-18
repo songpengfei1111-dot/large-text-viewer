@@ -1,7 +1,8 @@
 // insn_analyzer.rs
 // 指令分析模块：解析指令格式，生成搜索pattern，处理污点传播逻辑
 use anyhow::{Result, anyhow};
-use crate::summery_analyzer::AssemblyInstruction;
+
+const SEP: char = ';';
 
 // 常见的内存访问大小（字节）
 const COMMON_MEM_SIZES: &[usize] = &[16, 8, 4, 2, 1];
@@ -18,8 +19,21 @@ pub enum InsnType {
 #[derive(Debug, Clone)]
 pub struct ParsedInsn {
     pub raw_text: String,
+
+    // 原始CSV字段
+    pub full_addr: String,
+    pub offset: String,
+    pub hex: String,
+    pub opcode: String,
+    pub operands: String,
+    pub read_regs_raw: String,
+    pub mem_detail: String,
+    pub mem_info: String,
+    pub write_regs_raw: String,
+    pub unknown: String,
+    
+    // 解析后的信息
     pub insn_type: InsnType,
-    pub insn_name: String,
     
     // 寄存器信息
     pub read_regs: Vec<(String, String)>,   // (寄存器名, 值)
@@ -28,34 +42,44 @@ pub struct ParsedInsn {
     // 内存访问信息
     pub mem_addr: Option<u64>,
     pub mem_size: Option<usize>,
-    // TODO 使用mem_access_type = 0/1 来表示
     pub is_load: bool,
     pub is_store: bool,
-
 }
 
 impl ParsedInsn {
-    /// 这里的parse可以重写来兼容多种格式
-
     /// 从文本行解析指令（一次性解析所有信息）
     pub fn parse(line_text: &str) -> Self {
-        // 按字段解析
-        let insn = AssemblyInstruction::from_line(line_text);
-        // 提取指令名称
-        let insn_name = insn.opcode;
-        // 识别指令类型
-        let insn_type = Self::identify_type(&insn_name);
-        // 提取寄存器信息
-        let read_regs = Self::extract_reg_values(&insn.read_regs, "rr__");
-        let write_regs = Self::extract_reg_values(&insn.write_regs, "rw__");
+        let parts: Vec<&str> = line_text.split(SEP).collect();
         
-        // 提取内存访问信息
-        let (mem_addr, mem_size, is_load, is_store) = Self::extract_mem_info(&insn.mem_detail, &insn.mem_info);
+        let full_addr = parts.get(0).unwrap_or(&"").to_string();
+        let offset = parts.get(1).unwrap_or(&"").to_string();
+        let hex = parts.get(2).unwrap_or(&"").to_string();
+        let opcode = parts.get(3).unwrap_or(&"").to_string();
+        let operands = parts.get(4).unwrap_or(&"").to_string();
+        let read_regs_raw = parts.get(5).unwrap_or(&"").to_string();
+        let mem_detail = parts.get(6).unwrap_or(&"").to_string();
+        let mem_info = parts.get(7).unwrap_or(&"").to_string();
+        let write_regs_raw = parts.get(8).unwrap_or(&"").to_string();
+        let unknown = parts.get(9).unwrap_or(&"").to_string();
+        
+        let insn_type = Self::identify_type(&opcode);
+        let read_regs = Self::extract_reg_values(&read_regs_raw, "rr__");
+        let write_regs = Self::extract_reg_values(&write_regs_raw, "rw__");
+        let (mem_addr, mem_size, is_load, is_store) = Self::extract_mem_info(&mem_detail, &mem_info);
         
         Self {
             raw_text: line_text.to_string(),
+            full_addr,
+            offset,
+            hex,
+            opcode,
+            operands,
+            read_regs_raw,
+            mem_detail,
+            mem_info,
+            write_regs_raw,
+            unknown,
             insn_type,
-            insn_name,
             read_regs,
             write_regs,
             mem_addr,
@@ -192,7 +216,7 @@ impl ParsedInsn {
                 
                 // 生成该范围内的对齐地址
                 // ARM64 通常按 1, 2, 4, 8, 16 字节对齐
-                for offset in 1..write_size {
+                for offset in 1..=write_size {
                     let candidate_addr = addr - offset as u64;
                     
                     // 只添加对齐的地址（提高效率）
