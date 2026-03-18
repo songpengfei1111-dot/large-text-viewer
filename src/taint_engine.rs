@@ -241,29 +241,27 @@ impl TaintEngine {
             }
         }
 
-        let parsed = node.parsed_insn.as_ref()?;
+        let parsed = node.parsed_insn.as_ref()?.clone();
 
         match parsed.insn_type {
             InsnType::Load => {
-                if let Ok((dst_regs, addr, size)) = parsed.get_load_info() {
-                    self.debug_log(&format!("  [Load] 目标寄存器: {:?}, target={}, byte_range={:?}", dst_regs, target, self.current_byte_range));
-                    
-                    let (adjusted_addr, adjusted_size) = ParsedInsn::calculate_adjusted_address(
-                        &dst_regs, addr, size, target, &self.current_byte_range
-                    );
-                    
-                    node.trace_type = TraceType::MemToReg(format!("0x{:x}", adjusted_addr));
-                    if let Some(child) = self.trace_mem_read_node(line_num, adjusted_addr, adjusted_size, &dst_regs, depth, tree) {
-                        node.add_child(child);
-                    }
+                let Ok((dst_regs, addr, size)) = parsed.get_load_info() else { return Some(node) };
+                self.debug_log(&format!("  [Load] 目标寄存器: {:?}, target={}, byte_range={:?}", dst_regs, target, self.current_byte_range));
+                
+                let (adjusted_addr, adjusted_size) = ParsedInsn::calculate_adjusted_address(
+                    &dst_regs, addr, size, target, &self.current_byte_range
+                );
+                
+                node.trace_type = TraceType::MemToReg(format!("0x{:x}", adjusted_addr));
+                if let Some(child) = self.trace_mem_read_node(line_num, adjusted_addr, adjusted_size, &dst_regs, depth, tree) {
+                    node.add_child(child);
                 }
             }
             InsnType::Store => {
-                if let Ok((src_regs, addr, size)) = parsed.get_store_info() {
-                    node.trace_type = TraceType::RegToMem(src_regs.join(","));
-                    if let Some(child) = self.trace_mem_write_node(line_num, &src_regs, addr, size, depth, tree) {
-                        node.add_child(child);
-                    }
+                let Ok((src_regs, addr, size)) = parsed.get_store_info() else { return Some(node) };
+                node.trace_type = TraceType::RegToMem(src_regs.join(","));
+                if let Some(child) = self.trace_mem_write_node(line_num, &src_regs, addr, size, depth, tree) {
+                    node.add_child(child);
                 }
             }
             InsnType::Arith => {
@@ -305,54 +303,38 @@ impl TaintEngine {
         src_regs: &[String],
         write_offset: usize,
     ) -> bool {
-        let load_parsed = match self.service.get_line_text(load_line_num) {
-            Some(text) => ParsedInsn::parse(&text),
-            None => return true,
-        };
+        let Some(load_text) = self.service.get_line_text(load_line_num) else { return true; };
+        let load_parsed = ParsedInsn::parse(&load_text);
         
-        let store_parsed = match self.service.get_line_text(store_line_num) {
-            Some(text) => ParsedInsn::parse(&text),
-            None => return true,
-        };
+        let Some(store_text) = self.service.get_line_text(store_line_num) else { return true; };
+        let store_parsed = ParsedInsn::parse(&store_text);
         
         let target_reg = self.current_byte_range.as_ref()
             .map(|(reg, _, _)| reg.clone())
             .or_else(|| dst_regs.first().cloned())
             .unwrap_or_default();
         
-        if target_reg.is_empty() {
-            return true;
-        }
+        if target_reg.is_empty() { return true; }
         
-        let expected_value = match load_parsed.write_regs.iter().find(|(reg, _)| reg == &target_reg) {
-            Some((_, val)) => val,
-            None => return true,
-        };
+        let Some((_, expected_value)) = load_parsed.write_regs.iter().find(|(reg, _)| reg == &target_reg) else { return true; };
         
         let src_reg_index = (write_offset / 8).min(src_regs.len().saturating_sub(1));
-        let src_reg = match src_regs.get(src_reg_index) {
-            Some(reg) => reg,
-            None => return true,
-        };
+        let Some(src_reg) = src_regs.get(src_reg_index) else { return true; };
         
         if target_reg.chars().next() != src_reg.chars().next() {
-            println!("  ℹ 寄存器类型不同 ({:?} vs {:?})，跳过值校验", 
-                     target_reg.chars().next(), src_reg.chars().next());
+            println!("  ℹ 寄存器类型不同 ({:?} vs {:?})，跳过值校验", target_reg.chars().next(), src_reg.chars().next());
             return true;
         }
         
-        match store_parsed.read_regs.iter().find(|(r, _)| r == src_reg) {
-            Some((_, actual_val)) if actual_val != expected_value => {
+        if let Some((_, actual_val)) = store_parsed.read_regs.iter().find(|(r, _)| r == src_reg) {
+            if actual_val != expected_value {
                 println!("  ⚠ 值不匹配: 期望 {}, 实际 {} (寄存器 {})", expected_value, actual_val, src_reg);
                 println!("  → 继续搜索其他候选...");
-                false
+                return false;
             }
-            Some(_) => {
-                println!("  ✓ 值校验通过: {} = {}", src_reg, expected_value);
-                true
-            }
-            None => true,
+            println!("  ✓ 值校验通过: {} = {}", src_reg, expected_value);
         }
+        true
     }
 
     fn trace_source_register_node(
@@ -365,9 +347,7 @@ impl TaintEngine {
         depth: usize,
         tree: &mut TaintTree,
     ) -> Option<TaintTreeNode> {
-        if src_regs.is_empty() {
-            return None;
-        }
+        if src_regs.is_empty() { return None; }
         
         let src_reg_index = (write_offset / 8).min(src_regs.len().saturating_sub(1));
         let src_reg = &src_regs[src_reg_index];
@@ -377,13 +357,11 @@ impl TaintEngine {
         
         let old_byte_range = self.current_byte_range.clone();
         if write_offset > 0 || overlap_size < write_size {
-            println!("  → 追踪 {} 的字节 [{}:{}]", 
-                     src_reg, reg_internal_offset, reg_internal_offset + overlap_size);
+            println!("  → 追踪 {} 的字节 [{}:{}]", src_reg, reg_internal_offset, reg_internal_offset + overlap_size);
             self.current_byte_range = Some((src_reg.clone(), reg_internal_offset, overlap_size));
         }
         
         let result = self._trace_backward_node(prev_line_num, src_reg, depth + 1, tree);
-        
         self.current_byte_range = old_byte_range;
         
         result
@@ -421,62 +399,46 @@ impl TaintEngine {
         
         loop {
             let prev = self.service.find_prev(current_line, config.clone())?;
+            current_line = prev.line_number;
             
-            let line_text = self.service.get_line_text(prev.line_number)?;
+            let line_text = self.service.get_line_text(current_line)?;
             let parsed = ParsedInsn::parse(&line_text);
             
-            if let Ok((src_regs, write_addr, write_size)) = parsed.get_store_info() {
-                if let Some((write_offset, overlap_size)) = ParsedInsn::check_memory_overlap(
-                    addr, size, write_addr, write_size
-                ) {
-                    println!("  ✓ 找到匹配 [行 {}]: write[0x{:x}+{}:{}] -> read[0x{:x}:0x{:x}]", 
-                             prev.line_number + 1,
-                             write_addr,
-                             write_offset,
-                             write_offset + overlap_size,
-                             addr,
-                             addr + size as u64);
-                    
-                    self.debug_log(&format!("    {}", parsed.raw_text));
+            let Ok((src_regs, write_addr, write_size)) = parsed.get_store_info() else { continue; };
+            
+            let Some((write_offset, overlap_size)) = ParsedInsn::check_memory_overlap(addr, size, write_addr, write_size) else {
+                self.debug_log(&format!("    [跳过] 地址不匹配: 0x{:x} vs 0x{:x}", write_addr, addr));
+                continue;
+            };
+            
+            println!("  ✓ 找到匹配 [行 {}]: write[0x{:x}+{}:{}] -> read[0x{:x}:0x{:x}]", 
+                     current_line + 1, write_addr, write_offset, write_offset + overlap_size, addr, addr + size as u64);
+            self.debug_log(&format!("    {}", parsed.raw_text));
 
-                    if !self.validate_store_value(line_num, prev.line_number, dst_regs, &src_regs, write_offset) {
-                        current_line = prev.line_number;
-                        continue;
-                    }
-                    
-                    if let Some(result) = self.trace_source_register_node(
-                        prev.line_number, &src_regs, write_offset, overlap_size, write_size, depth, tree
-                    ) {
-                        return Some(result);
-                    }
-
-                    return self._trace_backward_node(prev.line_number, &format!("0x{:x}", addr), depth + 1, tree);
-                } else {
-                    self.debug_log(&format!("    [跳过] 地址不匹配: 0x{:x} vs 0x{:x}", write_addr, addr));
-                    current_line = prev.line_number;
-                    continue;
-                }
+            if !self.validate_store_value(line_num, current_line, dst_regs, &src_regs, write_offset) {
+                continue;
             }
             
-            current_line = prev.line_number;
+            if let Some(result) = self.trace_source_register_node(current_line, &src_regs, write_offset, overlap_size, write_size, depth, tree) {
+                return Some(result);
+            }
+
+            return self._trace_backward_node(current_line, &format!("0x{:x}", addr), depth + 1, tree);
         }
     }
 
     fn trace_mem_write_node(&mut self, line_num: usize, src_regs: &[String], _addr: u64, _size: usize, depth: usize, tree: &mut TaintTree) -> Option<TaintTreeNode> {
         let src_reg = src_regs.first()?;
-        
         let line_text = self.service.get_line_text(line_num)?;
         let parsed = ParsedInsn::parse(&line_text);
         
-        parsed.read_regs.iter()
-            .find(|(r, _)| r == src_reg)
-            .and_then(|(_, value)| {
-                let search_pattern = ParsedInsn::gen_reg_write_pattern(src_reg, value);
-                println!("[regW] {}", search_pattern.pattern);
-                
-                let config = SearchConfig::new(search_pattern.pattern).with_regex(search_pattern.is_regex);
-                self.find_and_trace_node(line_num, &config, src_reg, depth, tree)
-            })
+        let (_, value) = parsed.read_regs.iter().find(|(r, _)| r == src_reg)?;
+        
+        let search_pattern = ParsedInsn::gen_reg_write_pattern(src_reg, value);
+        println!("[regW] {}", search_pattern.pattern);
+        
+        let config = SearchConfig::new(search_pattern.pattern).with_regex(search_pattern.is_regex);
+        self.find_and_trace_node(line_num, &config, src_reg, depth, tree)
     }
 
     fn trace_reg_transfer_node(&mut self, line_num: usize, reg: &str, _value: &str, depth: usize, tree: &mut TaintTree) -> Option<TaintTreeNode> {
@@ -498,22 +460,19 @@ impl TaintEngine {
             .collect();
         
         let patterns = ParsedInsn::gen_arith_patterns(&reg_values);
-        
         println!("  → 开始追踪 {} 个源寄存器:", reg_values.len());
         
         let mut result = Vec::new();
         for (idx, ((reg, val), pattern)) in reg_values.iter().zip(patterns.iter()).enumerate() {
-            if ParsedInsn::is_zero_register(reg) || ParsedInsn::is_constant_value(val) {
-                continue;
-            }
+            if ParsedInsn::is_zero_register(reg) || ParsedInsn::is_constant_value(val) { continue; }
             
             println!("  [分支 {}] 追踪寄存器: {}", idx + 1, reg);
             println!("    搜索模式: {}", pattern.pattern);
+            
             let config = SearchConfig::new(pattern.pattern.clone()).with_regex(pattern.is_regex);
             
             if let Some(prev) = self.service.find_prev(line_num, config) {
-                println!("    ✓ 找到 [行 {}]: {}", prev.line_number + 1,
-                         self.service.get_line_text(prev.line_number).unwrap_or_default());
+                println!("    ✓ 找到 [行 {}]: {}", prev.line_number + 1, self.service.get_line_text(prev.line_number).unwrap_or_default());
                 if let Some(node) = self._trace_backward_node(prev.line_number, reg, depth + 1, tree) {
                     result.push(node);
                 }
@@ -526,16 +485,13 @@ impl TaintEngine {
     }
 
     fn find_and_trace_node(&mut self, line_num: usize, config: &SearchConfig, target: &str, depth: usize, tree: &mut TaintTree) -> Option<TaintTreeNode> {
-        self.service.find_prev(line_num, config.clone())
-            .and_then(|prev| {
-                println!("\t{}: {}", prev.line_number + 1, 
-                         self.service.get_line_text(prev.line_number).unwrap_or_default());
-                self._trace_backward_node(prev.line_number, target, depth + 1, tree)
-            })
-            .or_else(|| {
-                println!("❌ 未找到来源");
-                None
-            })
+        let prev = self.service.find_prev(line_num, config.clone()).or_else(|| {
+            println!("❌ 未找到来源");
+            None
+        })?;
+        
+        println!("\t{}: {}", prev.line_number + 1, self.service.get_line_text(prev.line_number).unwrap_or_default());
+        self._trace_backward_node(prev.line_number, target, depth + 1, tree)
     }
 }
 

@@ -3,12 +3,6 @@
 use anyhow::{Result, anyhow};
 use crate::summery_analyzer::AssemblyInstruction;
 
-// 寄存器字段前缀常量
-const PREFIX_REG_READ: &str = "rr__";
-const PREFIX_REG_WRITE: &str = "rw__";
-const PREFIX_MEM_LOAD: &str = "ld__";
-const PREFIX_MEM_STORE: &str = "st__";
-
 // 常见的内存访问大小（字节）
 const COMMON_MEM_SIZES: &[usize] = &[16, 8, 4, 2, 1];
 
@@ -34,27 +28,29 @@ pub struct ParsedInsn {
     // 内存访问信息
     pub mem_addr: Option<u64>,
     pub mem_size: Option<usize>,
+    // TODO 使用mem_access_type = 0/1 来表示
     pub is_load: bool,
     pub is_store: bool,
+
 }
 
 impl ParsedInsn {
+    /// 这里的parse可以重写来兼容多种格式
+
     /// 从文本行解析指令（一次性解析所有信息）
     pub fn parse(line_text: &str) -> Self {
-        let asm = AssemblyInstruction::from_line(line_text);
-        
+        // 按字段解析
+        let insn = AssemblyInstruction::from_line(line_text);
         // 提取指令名称
-        let insn_name = asm.opcode.trim().to_string();
-        
+        let insn_name = insn.opcode;
         // 识别指令类型
         let insn_type = Self::identify_type(&insn_name);
-        
         // 提取寄存器信息
-        let read_regs = Self::extract_reg_values(&asm.read_regs, PREFIX_REG_READ);
-        let write_regs = Self::extract_reg_values(&asm.write_regs, PREFIX_REG_WRITE);
+        let read_regs = Self::extract_reg_values(&insn.read_regs, "rr__");
+        let write_regs = Self::extract_reg_values(&insn.write_regs, "rw__");
         
         // 提取内存访问信息
-        let (mem_addr, mem_size, is_load, is_store) = Self::extract_mem_info(&asm.mem_detail, &asm.mem_info);
+        let (mem_addr, mem_size, is_load, is_store) = Self::extract_mem_info(&insn.mem_detail, &insn.mem_info);
         
         Self {
             raw_text: line_text.to_string(),
@@ -117,9 +113,9 @@ impl ParsedInsn {
     
     /// 提取内存访问信息
     fn extract_mem_info(_mem_detail: &str, mem_info: &str) -> (Option<u64>, Option<usize>, bool, bool) {
-        let (is_load, marker) = if let Some(marker) = mem_info.strip_prefix(PREFIX_MEM_LOAD) {
+        let (is_load, marker) = if let Some(marker) = mem_info.strip_prefix("ld__") {
             (true, marker)
-        } else if let Some(marker) = mem_info.strip_prefix(PREFIX_MEM_STORE) {
+        } else if let Some(marker) = mem_info.strip_prefix("st__") {
             (false, marker)
         } else {
             return (None, None, false, false);
@@ -160,10 +156,6 @@ impl ParsedInsn {
     
     /// 获取Load指令信息 (目标寄存器列表, 内存地址, 访问大小)
     pub fn get_load_info(&self) -> Result<(Vec<String>, u64, usize)> {
-        if !self.is_load {
-            return Err(anyhow!("Not a load instruction"));
-        }
-        
         let addr = self.mem_addr.ok_or_else(|| anyhow!("No memory address"))?;
         let size = self.mem_size.ok_or_else(|| anyhow!("No memory size"))?;
         
@@ -172,10 +164,6 @@ impl ParsedInsn {
     
     /// 获取Store指令信息 (源寄存器列表, 内存地址, 访问大小)
     pub fn get_store_info(&self) -> Result<(Vec<String>, u64, usize)> {
-        if !self.is_store {
-            return Err(anyhow!("Not a store instruction"));
-        }
-        
         let addr = self.mem_addr.ok_or_else(|| anyhow!("No memory address"))?;
         let size = self.mem_size.ok_or_else(|| anyhow!("No memory size"))?;
         
@@ -188,7 +176,7 @@ impl ParsedInsn {
         
         // 优先级1: 精确匹配地址（任意大小）
         patterns.push(SearchPattern {
-            pattern: format!("{}{:x}_", PREFIX_MEM_STORE, addr),
+            pattern: format!("{}{:x}_", "st__", addr),
             is_regex: false,
             description: format!("精确匹配: 写入地址 0x{:x}", addr),
         });
@@ -210,7 +198,7 @@ impl ParsedInsn {
                     // 只添加对齐的地址（提高效率）
                     if Self::is_aligned(candidate_addr, write_size) {
                         patterns.push(SearchPattern {
-                            pattern: format!("{}{:x}_{}", PREFIX_MEM_STORE, candidate_addr, write_size),
+                            pattern: format!("{}{:x}_{}", "st__", candidate_addr, write_size),
                             is_regex: false,
                             description: format!(
                                 "重叠匹配: 写入 0x{:x} ({} 字节) 可能覆盖 0x{:x}",
