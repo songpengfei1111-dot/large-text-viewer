@@ -520,7 +520,7 @@ impl TaintEngine {
 pub fn test_taint_overlap() -> anyhow::Result<()> {
     use large_text_core::file_reader::FileReader;
 
-    let file_path = std::path::PathBuf::from("/Users/bytedance/RustroverProjects/logs/record_01.csv");
+    let file_path = std::path::PathBuf::from("/Users/teng/RustroverProjects/large-text-viewer/logs/record_01.csv");
     let reader = FileReader::new(file_path, encoding_rs::UTF_8)?;
     let service = SearchService::new(reader);
 
