@@ -107,7 +107,6 @@ impl ParsedInsn {
     /// rr__w22=0x1_w23=0x2 -> ((w22,0x1),(w23,0x2))
     fn extract_reg_values(field: &str) -> Vec<(String, String)> {
         if field.is_empty() { return vec![]; }
-
         field[4..]
             .split('_')
             .filter_map(|pair| pair.split_once('='))

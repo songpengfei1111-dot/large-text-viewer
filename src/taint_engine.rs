@@ -258,6 +258,7 @@ impl TaintEngine {
                 );
                 
                 node.trace_type = TraceType::MemToReg(format!("0x{:x}", adjusted_addr));
+                // 生产pattern；尝试建立一个节点，如果建立节点成功，那么就add child
                 if let Some(child) = self.trace_mem_read_node(line_num, adjusted_addr, adjusted_size, &dst_regs, depth, tree) {
                     node.add_child(child);
                 }
