@@ -38,6 +38,7 @@ pub struct TaintTreeNode {
 
 impl TaintTreeNode {
     fn new(line_num: usize, depth: usize) -> Self {
+        // 新建一个node时自动初始化
         Self {
             line_num,
             instruction: String::new(),
@@ -48,12 +49,12 @@ impl TaintTreeNode {
         }
     }
 
-
-
-    fn init_from_service(&mut self, service: &mut SearchService) {
+    // 初始化根节点
+    fn init_root_node(&mut self, service: &mut SearchService) {
         if let Some(line_text) = service.get_line_text(self.line_num) {
             self.instruction = line_text.clone();
             self.parsed_insn = Some(ParsedInsn::parse(&line_text));
+            println!("[target line]: {}", line_text);
         }
     }
 
@@ -237,14 +238,8 @@ impl TaintEngine {
 
         self.visited.insert(line_num);
 
-        let mut node = TaintTreeNode::new(line_num, depth);
-        node.init_from_service(&mut self.service);
-        
-        if depth == 0 {
-            if let Some(line_text) = self.service.get_line_text(line_num) {
-                println!("[target line]: {}", line_text);
-            }
-        }
+        let mut node = TaintTreeNode::new(line_num, depth); // 初始化一个空节点
+        node.init_root_node(&mut self.service);
 
         let parsed = node.parsed_insn.as_ref()?.clone();
 
@@ -392,7 +387,7 @@ impl TaintEngine {
     fn trace_mem_read_node(&mut self, line_num: usize, addr: u64, size: usize, dst_regs: &[String], depth: usize, tree: &mut TaintTree) -> Option<TaintTreeNode> {
         println!("[mem2mem]: 启发式搜索 0x{:x} ({} 字节)", addr, size);
         let search_patterns = ParsedInsn::gen_mem_read_patterns(addr, size);
-        println!("{:#?}", search_patterns);
+        // println!("{:#?}", search_patterns);
         
         for (priority, pattern) in search_patterns.iter().enumerate() {
             self.debug_log(&format!("  [优先级 {}] {}: {}", priority + 1, pattern.description, pattern.pattern));
@@ -526,7 +521,7 @@ pub fn test_taint_overlap() -> anyhow::Result<()> {
 
     let mut engine = TaintEngine::new(service)
         .with_max_depth(15)
-        .with_debug(true);
+        .with_debug(false);
 
     println!("\n=== 追踪内存地址: ld__6cf01586a8_8 ===\n");
     if let Some(tree) = engine.trace_backward(9217, "ld__6cf01586a8_8")? {
