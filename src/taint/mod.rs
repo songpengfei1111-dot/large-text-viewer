@@ -56,9 +56,9 @@ pub fn test_def_use() -> anyhow::Result<()> {
         println!("\n=== 以 target_line: 行 {} (写 {}) 为起点进行后向切片 ===", start + 1, target_reg);
         
         // 我们以这个找到的定义行为起点，进行后向切片
-        let marked_lines = slicer::backward_slice(&state, &[start]);
+        let slice_result = slicer::backward_slice(&state, &[start]);
         
-        let mut sorted_lines: Vec<_> = marked_lines.into_iter().collect();
+        let mut sorted_lines: Vec<_> = slice_result.marked_lines.iter().copied().collect();
         sorted_lines.sort_unstable();
         
         println!("切片包含 {} 行，占总行数的 {:.2}%", 
@@ -71,6 +71,9 @@ pub fn test_def_use() -> anyhow::Result<()> {
                 println!("  [Line {}]: {}", line + 1, text);
             }
         }
+
+        // 渲染重构后的 DAG，可以选择是否开启 Pass-Through 剪枝
+        slice_result.render_dag(&mut service, true);
     } else {
         println!("未找到目标寄存器在指定行的相关定义");
     }
