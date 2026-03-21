@@ -158,41 +158,14 @@ impl ParsedInsn {
     pub fn gen_mem_read_patterns(addr: u64, size: usize) -> Vec<SearchPattern> {
         let mut patterns = Vec::new();
         
-        // 优先级1: 精确匹配地址（任意大小）
+        // 我们不再生成基于正则的地址匹配，因为那非常慢且覆盖不全
+        // 而是直接搜索 `st__`，这会匹配所有的 store 内存写入指令
+        // 在 TaintEngine 中，结合 check_memory_overlap 来精准过滤
         patterns.push(SearchPattern {
-            pattern: format!("{}{:x}_", "st__", addr),
+            pattern: "st__".to_string(),
             is_regex: false,
-            description: format!("精确匹配: 写入地址 0x{:x}", addr),
+            description: format!("搜索所有的 store 指令以寻找覆盖 0x{:x}[{}] 的写入", addr, size),
         });
-        
-        // 优先级2-N: 向前查找可能覆盖该地址的写入
-        // 对于常见的写入大小 (1, 2, 4, 8, 16 字节)，计算可能的起始地址
-        for &write_size in COMMON_MEM_SIZES {
-            // 计算可能的写入起始地址范围
-            // 如果 write_addr + write_size > addr，则可能覆盖
-            // 即 write_addr > addr - write_size
-            if addr >= write_size as u64 {
-                let _min_write_addr = addr - write_size as u64 + 1;
-                
-                // 生成该范围内的对齐地址
-                // ARM64 通常按 1, 2, 4, 8, 16 字节对齐
-                for offset in 1..=write_size {
-                    let candidate_addr = addr - offset as u64;
-                    
-                    // 只添加对齐的地址（提高效率）
-                    if Self::is_aligned(candidate_addr, write_size) {
-                        patterns.push(SearchPattern {
-                            pattern: format!("{}{:x}_{}", "st__", candidate_addr, write_size),
-                            is_regex: false,
-                            description: format!(
-                                "重叠匹配: 写入 0x{:x} ({} 字节) 可能覆盖 0x{:x}",
-                                candidate_addr, write_size, addr
-                            ),
-                        });
-                    }
-                }
-            }
-        }
         
         patterns
     }
@@ -237,41 +210,40 @@ impl ParsedInsn {
 
     /// 生成寄存器写入的搜索pattern
     pub fn gen_reg_write_pattern(reg: &str, value: &str) -> SearchPattern {
-        // 去掉寄存器前缀 (x0 -> 0, w8 -> 8)
-        let reg_num = reg.trim_start_matches(|c: char| !c.is_numeric());
-        let pattern = format!("rw_.*{}={}", reg_num, value);
+        // 使用精确子串匹配，大大提高搜索速度，并支持SIMD
+        let norm_reg = Self::normalize_reg(reg);
+        let pattern = format!("rw__{}=", norm_reg);
         
         SearchPattern {
-            pattern: pattern.clone(),
-            is_regex: true,
-            description: format!("查找写入寄存器 {} 值为 {} 的指令", reg, value),
+            pattern,
+            is_regex: false,
+            description: format!("查找写入寄存器 {} (规范为 {}) 的指令", reg, norm_reg),
         }
     }
 
     /// 生成寄存器读取的搜索pattern
     pub fn gen_reg_read_pattern(reg: &str, value: &str) -> SearchPattern {
-        let reg_num = reg.trim_start_matches(|c: char| !c.is_numeric());
-        let pattern = format!("rw_.*{}={}", reg_num, value);
+        let norm_reg = Self::normalize_reg(reg);
+        let pattern = format!("rw__{}=", norm_reg);
         
         SearchPattern {
-            pattern: pattern.clone(),
+            pattern,
             is_regex: false,
-            description: format!("查找寄存器 {} 被写入值 {} 的位置", reg, value),
+            description: format!("查找寄存器 {} (规范为 {}) 的定义位置", reg, norm_reg),
         }
     }
 
     /// 生成算术运算的搜索pattern
     pub fn gen_arith_patterns(src_regs: &[(String, String)]) -> Vec<SearchPattern> {
         src_regs.iter()
-            .map(|(reg, val)| {
-                let reg_num = reg.trim_start_matches(|c: char| !c.is_numeric());
-                // 搜索写入该寄存器且值匹配的指令
-                let pattern = format!("rw_.*{}={}", reg_num, val);
+            .map(|(reg, _val)| {
+                let norm_reg = Self::normalize_reg(reg);
+                let pattern = format!("rw__{}=", norm_reg);
                 
                 SearchPattern {
-                    pattern: pattern.clone(),
-                    is_regex: true,
-                    description: format!("查找写入寄存器 {} 值为 {} 的指令", reg, val),
+                    pattern,
+                    is_regex: false,
+                    description: format!("查找写入寄存器 {} (规范为 {}) 的指令", reg, norm_reg),
                 }
             })
             .collect()
@@ -283,6 +255,28 @@ impl ParsedInsn {
     /// 判断寄存器是否是零寄存器（常量）
     pub fn is_zero_register(reg: &str) -> bool {
         reg == "wzr" || reg == "xzr" || reg == "zr"
+    }
+
+    /// 归一化寄存器名称，如 w0 -> x0, q0 -> v0, 统一位宽
+    pub fn normalize_reg(reg: &str) -> String {
+        if reg.is_empty() { return reg.to_string(); }
+        if reg == "wzr" { return "xzr".to_string(); }
+        
+        let mut chars = reg.chars();
+        let first = chars.next().unwrap();
+        let rest: String = chars.collect();
+        
+        match first {
+            'w' | 'W' => format!("x{}", rest),
+            's' | 'S' | 'd' | 'D' | 'q' | 'Q' | 'b' | 'B' | 'h' | 'H' => {
+                if rest.chars().all(|c| c.is_ascii_digit()) {
+                    format!("v{}", rest)
+                } else {
+                    reg.to_string()
+                }
+            },
+            _ => reg.to_string()
+        }
     }
 
     /// 获取寄存器大小（字节）

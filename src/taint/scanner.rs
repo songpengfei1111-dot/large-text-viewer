@@ -45,24 +45,7 @@ impl ScanState {
 }
 
 fn normalize_reg(reg: &str) -> String {
-    if reg.is_empty() { return reg.to_string(); }
-    if reg == "wzr" { return "xzr".to_string(); }
-    
-    let mut chars = reg.chars();
-    let first = chars.next().unwrap();
-    let rest: String = chars.collect();
-    
-    match first {
-        'w' | 'W' => format!("x{}", rest),
-        's' | 'S' | 'd' | 'D' | 'q' | 'Q' | 'b' | 'B' | 'h' | 'H' => {
-            if rest.chars().all(|c| c.is_ascii_digit()) {
-                format!("v{}", rest)
-            } else {
-                reg.to_string()
-            }
-        },
-        _ => reg.to_string()
-    }
+    ParsedInsn::normalize_reg(reg)
 }
 
 fn push_unique(vec: &mut Vec<DepNode>, val: DepNode) {
