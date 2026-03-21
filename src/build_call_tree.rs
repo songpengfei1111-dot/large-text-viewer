@@ -290,6 +290,7 @@ impl CallTree {
             }
         }
 
+        
         deepest_node_id.map(|node_id| {
             let current_node = self.nodes[node_id as usize].clone();
             let call_chain = self.get_call_chain(node_id);
