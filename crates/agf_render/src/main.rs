@@ -14,6 +14,7 @@ mod canvas;
 mod graph;
 mod layout;
 mod render;
+mod svg_render;
 
 use graph::{EdgeColor, Graph};
 
@@ -244,4 +245,8 @@ fn main() {
 
     layout::layout(&mut g4);
     render::render_to_stdout(&g4);
+
+    let svg_content = svg_render::render_to_svg(&g4);
+    std::fs::write("output.svg", svg_content).unwrap();
+    println!("SVG output written to output.svg");
 }

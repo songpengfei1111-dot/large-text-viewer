@@ -6,8 +6,10 @@ pub mod canvas;
 pub mod graph;
 pub mod layout;
 pub mod render;
+pub mod svg_render;
 
 // 重新导出常用类型，方便使用
 pub use graph::{Edge, EdgeColor, Graph, Node, NodeId};
 pub use layout::layout;
 pub use render::{render, render_to_stdout};
+pub use svg_render::render_to_svg;
