@@ -12,8 +12,6 @@ categories = ["gui", "visualization"]
 members = ["crates/large-text-core"]
 
 [dependencies]
-eframe = "0.29"
-egui = "0.29"
 notify = "6.1"
 rfd = "0.15"
 anyhow = "1.0"

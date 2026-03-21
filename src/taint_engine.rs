@@ -1,7 +1,6 @@
 // taint_engine.rs
 use crate::search_service::{SearchService, SearchConfig};
 use crate::insn_analyzer::{InsnType, ParsedInsn};
-use crate::tree::{TreeNode, Tree};
 use anyhow::Result;
 use std::collections::HashSet;
 use agf_render::{Graph, EdgeColor, layout, render_to_stdout};
@@ -127,19 +126,25 @@ impl TaintTreeNode {
         let truncated: String = text.chars().take(max_len - 3).collect();
         format!("{}...", truncated)
     }
-}
 
-impl TreeNode for TaintTreeNode {
-    fn children_mut(&mut self) -> &mut Vec<Self> {
+    pub fn children_mut(&mut self) -> &mut Vec<Self> {
         &mut self.children
     }
     
-    fn children(&self) -> &[Self] {
+    pub fn children(&self) -> &[Self] {
         &self.children
     }
     
-    fn depth(&self) -> usize {
+    pub fn depth(&self) -> usize {
         self.depth
+    }
+
+    pub fn add_child(&mut self, child: Self) {
+        self.children.push(child);
+    }
+    
+    pub fn add_children(&mut self, children: impl IntoIterator<Item = Self>) {
+        self.children.extend(children);
     }
 }
 
@@ -153,6 +158,49 @@ impl TaintTree {
         Self {
             root: None,
         }
+    }
+
+    pub fn root(&self) -> Option<&TaintTreeNode> {
+        self.root.as_ref()
+    }
+
+    pub fn root_mut(&mut self) -> Option<&mut TaintTreeNode> {
+        self.root.as_mut()
+    }
+
+    pub fn set_root(&mut self, root: TaintTreeNode) {
+        self.root = Some(root);
+    }
+
+    pub fn max_depth(&self) -> usize {
+        self.root()
+            .map(|root| Self::calculate_max_depth(root))
+            .unwrap_or(0)
+    }
+    
+    fn calculate_max_depth(node: &TaintTreeNode) -> usize {
+        if node.children.is_empty() {
+            node.depth
+        } else {
+            node.children
+                .iter()
+                .map(Self::calculate_max_depth)
+                .max()
+                .unwrap_or(node.depth)
+        }
+    }
+    
+    pub fn count_nodes(&self) -> usize {
+        self.root()
+            .map(|root| 1 + Self::count_children_nodes(root))
+            .unwrap_or(0)
+    }
+    
+    fn count_children_nodes(node: &TaintTreeNode) -> usize {
+        node.children
+            .iter()
+            .map(|child| 1 + Self::count_children_nodes(child))
+            .sum()
     }
 
     pub fn print(&self) {
@@ -169,20 +217,6 @@ impl TaintTree {
 
     pub fn count_instructions(&self) -> usize {
         self.count_nodes()
-    }
-}
-
-impl Tree<TaintTreeNode> for TaintTree {
-    fn root(&self) -> Option<&TaintTreeNode> {
-        self.root.as_ref()
-    }
-
-    fn root_mut(&mut self) -> Option<&mut TaintTreeNode> {
-        self.root.as_mut()
-    }
-
-    fn set_root(&mut self, root: TaintTreeNode) {
-        self.root = Some(root);
     }
 }
 
@@ -266,20 +300,14 @@ impl TaintEngine {
                 }
             }
             InsnType::Other => {
-                if parsed.read_regs.is_empty() || parsed.write_regs.is_empty() {
-                    println!("终点/常量");
-                    node.trace_type = TraceType::Constant;
-                } else {
-                    println!("[Other] 数据转移不分支");
-                    let (_src_reg, value) = &parsed.read_regs[0];
-                    let dst_reg = _src_reg;
-                    // let (dst_reg, _) = &parsed.write_regs[0];
-                    node.trace_type = TraceType::RegToReg(dst_reg.clone());
-                    if let Some(child) = self.trace_reg_transfer_node(line_num, dst_reg, value, depth, tree) {
-                        node.add_child(child);
-                    }
+                println!("[Other] 数据转移不分支");
+                let (_src_reg, value) = &parsed.read_regs[0];
+                node.trace_type = TraceType::RegToReg(_src_reg.clone()); //记录type，无关紧要
+                if let Some(child) = self.trace_reg_transfer_node(line_num, _src_reg, value, depth, tree) {
+                    node.add_child(child);
                 }
             }
+            // 添加节点任务和执行实体化的逻辑可以分开
             InsnType::Arith => {
                 if parsed.read_regs.is_empty() {
                     println!("终点/常量");
@@ -460,6 +488,7 @@ impl TaintEngine {
 
     fn trace_reg_transfer_node(&mut self, line_num: usize, reg: &str, _value: &str, depth: usize, tree: &mut TaintTree) -> Option<TaintTreeNode> {
         if ParsedInsn::is_zero_register(reg) {
+            //似乎多余
             println!("终点: 零寄存器 {}", reg);
             return None;
         }
@@ -515,7 +544,7 @@ impl TaintEngine {
 pub fn test_taint_overlap() -> anyhow::Result<()> {
     use large_text_core::file_reader::FileReader;
 
-    let file_path = std::path::PathBuf::from("/Users/teng/RustroverProjects/large-text-viewer/logs/record_01.csv");
+    let file_path = std::path::PathBuf::from("/Users/bytedance/RustroverProjects/logs/record_01.csv");
     let reader = FileReader::new(file_path, encoding_rs::UTF_8)?;
     let service = SearchService::new(reader);
 

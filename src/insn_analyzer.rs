@@ -1,7 +1,6 @@
 // insn_analyzer.rs
 // 指令分析模块：解析指令格式，生成搜索pattern，处理污点传播逻辑
 use anyhow::{Result, anyhow};
-use egui::debug_text::print;
 
 // 常见的内存访问大小（字节）
 const COMMON_MEM_SIZES: &[usize] = &[16, 8, 4, 2, 1];
