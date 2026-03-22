@@ -131,7 +131,7 @@ impl SliceResult {
         println!("\n=== 渲染追踪路径 (DAG){} ===\n", if prune_pass_through { " - 已剪枝" } else { "" });
         if !node_ids.is_empty() {
             layout(&mut graph);
-            render_to_stdout(&graph);
+            // render_to_stdout(&graph); //画到tui
 
             let svg_content = render_to_svg(&graph);
             if let Err(e) = std::fs::write("taint_output.svg", svg_content) {
