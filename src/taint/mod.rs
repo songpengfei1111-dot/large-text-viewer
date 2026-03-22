@@ -1,17 +1,22 @@
 // src/taint/mod.rs
 pub mod scanner;
 pub mod slicer;
+pub mod preprocessor;
 
 use large_text_core::file_reader::FileReader;
 use crate::search_service::SearchService;
+use std::path::PathBuf;
 
 pub fn test_def_use() -> anyhow::Result<()> {
     let file_path = std::path::PathBuf::from("/Users/bytedance/RustroverProjects/logs/record_01.csv");
+    // 假设缓存文件放在同一目录下，后缀改为 .taint_cache
+    let cache_path = PathBuf::from("/Users/bytedance/RustroverProjects/logs/record_01.taint_cache");
+    
     let reader = FileReader::new(file_path, encoding_rs::UTF_8)?;
     let mut service = SearchService::new(reader);
 
     println!("=== 开始构建 Def-Use 依赖图 ===");
-    let state = scanner::scan_pass(&mut service)?;
+    let state = scanner::scan_pass(&mut service, Some(&cache_path))?;
     
     // 验证行号: 9028 (CSV中 0-based 索引为 9027)
     // 目标行: 6d2d76e788;12b788;f94607f4;ldr;x20, [sp, #0xc08];;mr__6cf0157aa0_#0xc08;ld__6cf01586a8_8;rw__x20=0x6ccbf261e0;
