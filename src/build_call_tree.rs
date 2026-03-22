@@ -6,16 +6,15 @@ fn parse_hex(hex_str: &str) -> Option<u64> {
     u64::from_str_radix(trimmed, 16).ok()
 }
 
-// 删除 FunctionCall，不再需要
-// #[derive(Debug, Clone)]
-// pub struct FunctionCall {
-//     pub call_line: usize,
-//     pub call_addr: u64,
-//     pub target_func_addr: u64,
-//     pub ret_line: usize,
-//     pub ret_addr: u64,
-//     pub return_addr: u64,
-// }
+#[derive(Debug, Clone)]
+pub struct FunctionCall {
+    pub call_line: usize,
+    pub call_addr: u64,
+    pub target_func_addr: u64,
+    pub ret_line: usize,
+    pub ret_addr: u64,
+    pub return_addr: u64,
+}
 
 #[derive(Debug, Clone)]
 pub struct CallTreeNode {
@@ -57,149 +56,163 @@ impl FunctionCallAnalyzer {
         }
     }
 
+    pub fn analyze(&self) -> (Vec<FunctionCall>, Option<usize>) {
+        let mut function_calls = Vec::new();
+        let mut first_unmatched_ret = None;
+
+        for (ret_idx, ret_instr) in self.instructions.iter().enumerate() {
+            if !ret_instr.opcode.starts_with("ret") {
+                continue;
+            }
+
+            let Some(ret_addr) = parse_hex(&ret_instr.offset) else { continue };
+            let Some(next_instr) = self.instructions.get(ret_idx + 1) else { continue };
+            let Some(return_addr) = parse_hex(&next_instr.offset) else { continue };
+            let call_addr = return_addr - 4;
+
+            let Some((call_line, call_instr)) = self.find_call_instruction(call_addr, ret_idx) else {
+                eprintln!("err :[{:x},{:x}]", return_addr, call_addr);
+                if first_unmatched_ret.is_none() {
+                    first_unmatched_ret = Some(ret_idx + 1);
+                }
+                continue;
+            };
+
+            // println!("[{:x},{:x},{}]", return_addr, call_addr, call_line);
+
+            let Some(target_func_addr) = self.extract_call_target(&call_instr) else { continue };
+
+            function_calls.push(FunctionCall {
+                call_line,
+                call_addr,
+                target_func_addr,
+                ret_line: ret_idx + 1,
+                ret_addr,
+                return_addr,
+            });
+        }
+
+        (function_calls, first_unmatched_ret)
+    }
+
     pub fn build_call_tree(&self) -> CallTree {
+        let (function_calls, first_unmatched_ret) = self.analyze();
+        let first_func_addr = self.instructions.first()
+            .and_then(|instr| parse_hex(&instr.offset))
+            .unwrap_or(0);
+        Self::build_tree_from_calls(&function_calls, first_func_addr, first_unmatched_ret)
+    }
+
+    pub fn build_tree_from_calls(function_calls: &[FunctionCall], first_func_addr: u64, node1_ret_line: Option<usize>) -> CallTree {
+        let mut sorted_calls = function_calls.to_vec();
+        sorted_calls.sort_by_key(|call| call.call_line);
+
         let mut nodes = Vec::new();
         let mut call_stack: Vec<u32> = Vec::new();
         let mut next_id = 0;
 
-        // 1. 全局虚节点 (Node 0)
-        nodes.push(CallTreeNode {
+        let root = CallTreeNode {
             id: next_id,
             func_addr: 0,
             call_line: 0,
             ret_line: usize::MAX,
             parent_id: None,
             children_ids: Vec::new(),
-        });
+        };
+        nodes.push(root);
         next_id += 1;
 
-        // 2. 初始函数节点 (Node 1)
-        let first_func_addr = self.instructions.first()
-            .and_then(|instr| parse_hex(&instr.offset))
-            .unwrap_or(0);
-        nodes.push(CallTreeNode {
+        let first_func = CallTreeNode {
             id: next_id,
             func_addr: first_func_addr,
             call_line: 0,
-            ret_line: usize::MAX,
+            ret_line: node1_ret_line.unwrap_or(usize::MAX),
             parent_id: Some(0),
             children_ids: Vec::new(),
-        });
+        };
         nodes[0].children_ids.push(next_id);
-        
-        let mut current_id = next_id;
+        nodes.push(first_func);
         next_id += 1;
-        call_stack.push(0); // Node 0 入栈
 
-        let mut blr_pending_pc: Option<u64> = None;
+        call_stack.push(0);
+        call_stack.push(1);
 
-        for (i, instr) in self.instructions.iter().enumerate() {
-            let pc = parse_hex(&instr.offset).unwrap_or(0);
-            
-            // Unidbg 拦截调用检测 (PC + 4)
-            if let Some(blr_pc) = blr_pending_pc.take() {
-                if pc != 0 {
-                    nodes[current_id as usize].func_addr = pc; // 更新实际目标地址
-                    if pc == blr_pc + 4 {
-                        // 拦截调用，无函数体，自动闭合
-                        if let Some(parent_id) = call_stack.pop() {
-                            nodes[current_id as usize].ret_line = i.saturating_sub(1);
-                            current_id = parent_id;
-                        }
-                    }
+        for call in &sorted_calls {
+            while let Some(&current_id) = call_stack.last() {
+                let current_node = &nodes[current_id as usize];
+                if current_node.ret_line < call.call_line {
+                    call_stack.pop();
                 } else {
-                    blr_pending_pc = Some(blr_pc);
+                    break;
                 }
             }
 
-            // 处理指令，去掉前缀以适配不同的格式
-            let opcode = instr.opcode.trim().to_lowercase();
-            
-            // 匹配所有分支跳转相关的调用 (bl, blr, b.eq, b.ne, 等等如果当作调用处理的话，这里严格按 bl/blr)
-            // 根据 doc/traceui 里的实现，主要匹配 bl 和 blr
-            if opcode.starts_with("bl") && !opcode.starts_with("blr") {
-                let target = self.extract_call_target(instr).unwrap_or(0);
-                let child_id = next_id;
-                next_id += 1;
-                
-                nodes.push(CallTreeNode {
-                    id: child_id,
-                    func_addr: target,
-                    call_line: i,
-                    ret_line: usize::MAX,
-                    parent_id: Some(current_id),
-                    children_ids: Vec::new(),
-                });
-                nodes[current_id as usize].children_ids.push(child_id);
-                call_stack.push(current_id);
-                current_id = child_id;
-            } else if opcode.starts_with("blr") {
-                let target = self.extract_call_target(instr).unwrap_or(0);
-                let child_id = next_id;
-                next_id += 1;
-                
-                nodes.push(CallTreeNode {
-                    id: child_id,
-                    func_addr: target,
-                    call_line: i,
-                    ret_line: usize::MAX,
-                    parent_id: Some(current_id),
-                    children_ids: Vec::new(),
-                });
-                nodes[current_id as usize].children_ids.push(child_id);
-                call_stack.push(current_id);
-                current_id = child_id;
-                
-                blr_pending_pc = Some(pc);
-            } else if opcode.starts_with("ret") {
-                if let Some(parent_id) = call_stack.pop() {
-                    nodes[current_id as usize].ret_line = i;
-                    current_id = parent_id;
-                }
-            }
-        }
+            let parent_id = call_stack.last().copied();
+            let child_id = next_id;
+            next_id += 1;
 
-        let total_lines = self.instructions.len();
-        nodes[0].ret_line = total_lines.saturating_sub(1);
-        // 强行闭合所有未返回的节点
-        while let Some(parent_id) = call_stack.pop() {
-            nodes[current_id as usize].ret_line = total_lines.saturating_sub(1);
-            current_id = parent_id;
+            let child = CallTreeNode {
+                id: child_id,
+                func_addr: call.target_func_addr,
+                call_line: call.call_line,
+                ret_line: call.ret_line,
+                parent_id,
+                children_ids: Vec::new(),
+            };
+            nodes.push(child);
+
+            if let Some(parent_id) = parent_id {
+                nodes[parent_id as usize].children_ids.push(child_id);
+            }
+
+            call_stack.push(child_id);
         }
 
         CallTree { nodes }
     }
 
+    fn find_call_instruction(&self, target_addr: u64, before_idx: usize) -> Option<(usize, &AssemblyInstruction)> {
+        if let Some(&idx) = self.addr_map.get(&target_addr) {
+            if idx < before_idx {
+                let instr = &self.instructions[idx];
+                if instr.opcode.starts_with("bl") || instr.opcode.starts_with("blr") {
+                    return Some((idx + 1, instr));
+                }
+            }
+        }
+
+        for i in (0..before_idx).rev() {
+            let instr = &self.instructions[i];
+            if let Some(addr) = parse_hex(&instr.offset) {
+                if addr == target_addr && (instr.opcode.starts_with("bl") || instr.opcode.starts_with("blr")) {
+                    return Some((i + 1, instr));
+                }
+            }
+        }
+        None
+    }
+
     fn extract_call_target(&self, instr: &AssemblyInstruction) -> Option<u64> {
-        let opcode = instr.opcode.trim().to_lowercase();
-        if opcode.starts_with("bl") && !opcode.starts_with("blr") {
+        if instr.opcode.starts_with("bl") && !instr.opcode.starts_with("blr") {
             let operands = &instr.operands;
-            // 适配可能带括号或不带括号的情况
-            if let Some(start) = operands.find('(') {
-                if let Some(end) = operands.find(')') {
-                    return parse_hex(&operands[start + 1..end]);
-                }
-            }
-            // 尝试直接解析操作数
-            return parse_hex(operands.trim());
-        } else if opcode.starts_with("blr") {
-            let reg_part = instr.operands.trim();
+            let start = operands.find('(')?;
+            let end = operands.find(')')?;
+            return parse_hex(&operands[start + 1..end]);
+        } else if instr.opcode.starts_with("blr") {
+            let reg_part = &instr.operands;
             let read_regs = &instr.read_regs;
-            
-            // 尝试匹配格式: "x8=0x..." 或 "x8=0x..."
-            let search_pattern = format!("{}=", reg_part);
-            if let Some(eq_pos) = read_regs.find(&search_pattern) {
-                let mut val_start = eq_pos + search_pattern.len();
-                if read_regs[val_start..].starts_with("0x") {
-                    val_start += 2;
-                }
-                let val_end = read_regs[val_start..]
-                    .find(|c: char| !c.is_ascii_hexdigit())
-                    .map(|p| val_start + p)
-                    .unwrap_or(read_regs.len());
-                
-                return parse_hex(&read_regs[val_start..val_end]);
+
+            let eq_pos = read_regs.find(&format!("{}=", reg_part))?;
+            let mut val_start = eq_pos + reg_part.len() + 1;
+            if read_regs[val_start..].starts_with("0x") {
+                val_start += 2;
             }
+            let val_end = read_regs[val_start..]
+                .find(|c: char| !c.is_ascii_hexdigit())
+                .map(|p| val_start + p)
+                .unwrap_or(read_regs.len());
+
+            return parse_hex(&read_regs[val_start..val_end]);
         }
         None
     }
@@ -211,172 +224,19 @@ impl CallTree {
         self.print_tree(0, "", true, max_depth, 0);
     }
 
-    pub fn print_merged(&self, max_depth: usize) {
-        if self.nodes.is_empty() {
-            println!("树为空");
-            return;
-        }
-        
-        println!("=== 调用树 (合并显示, 最大深度: {}) ===", max_depth);
-        println!("根节点");
-        self.print_node_merged(0, "", true, 0, max_depth);
-    }
-
-    fn print_node_merged(&self, node_id: u32, prefix: &str, is_last: bool, current_depth: usize, max_depth: usize) {
-        if current_depth > max_depth {
-            return;
-        }
-
-        let node = &self.nodes[node_id as usize];
-        
-        if node_id != 0 {
-            let marker = if is_last { "└── " } else { "├── " };
-            
-            // 当前节点是否为合并节点（在外部传入时已处理好其显示内容）
-            // 我们这里需要在打印子节点前对子节点进行合并
-            // 合并逻辑: 对当前节点的所有子节点，按照 func_addr 进行分组聚合
-            // 记录它们的调用范围和次数
-        }
-        
-        // 提取并合并子节点
-        let mut merged_children: Vec<(u64, Vec<u32>)> = Vec::new();
-        // 保持原有的顺序（遇到新的func_addr或者连续的相同func_addr）
-        // 如果想把所有相同的都合并，可以使用 HashMap，这里我们保留调用顺序，只合并连续相同的调用，或者合并所有相同的？
-        // 用户要求："合并同一分支同一层级中相同函数的调用"，通常这意味着不关心顺序，只关心调用了哪些函数。
-        // 这里我们把当前层级所有相同的 func_addr 合并在一起。
-        
-        let mut grouped_children: std::collections::HashMap<u64, Vec<u32>> = std::collections::HashMap::new();
-        let mut order: Vec<u64> = Vec::new();
-
-        for &child_id in &node.children_ids {
-            let child = &self.nodes[child_id as usize];
-            if !grouped_children.contains_key(&child.func_addr) {
-                order.push(child.func_addr);
-            }
-            grouped_children.entry(child.func_addr).or_default().push(child_id);
-        }
-
-        for (i, &func_addr) in order.iter().enumerate() {
-            let is_last_child = i == order.len() - 1;
-            let group = &grouped_children[&func_addr];
-            
-            let count = group.len();
-            
-            // 收集所有的 call_line 和 ret_line
-            let mut calls = Vec::new();
-            for &id in group {
-                let n = &self.nodes[id as usize];
-                calls.push((n.call_line, n.ret_line));
-            }
-            
-            let marker = if is_last_child { "└── " } else { "├── " };
-            
-            // 格式化输出: 0xXXXX (count次) [call1->ret1, call2->ret2...]
-            // 为了避免太长，可以只显示部分或者简写
-            if count == 1 {
-                let n = &self.nodes[group[0] as usize];
-                println!("{}{}0x{:x} ({},{})", prefix, marker, func_addr, n.call_line, n.ret_line);
-            } else {
-                let ranges: String = calls.iter()
-                    .take(3) // 最多显示前3个
-                    .map(|(c, r)| format!("{}->{}", c, r))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                let more = if count > 3 { "..." } else { "" };
-                println!("{}{}0x{:x} [共{}次] ({}{})", prefix, marker, func_addr, count, ranges, more);
-            }
-
-            // 递归打印子节点的子节点
-            // 对于合并的节点，如果它们有自己的子树，我们如何展示？
-            // 方案：把第一个代表性节点的子树展开，或者把所有合并节点的子节点都当成下一级？
-            // 简单起见，如果合并了，我们把这组所有节点的子节点都归为下一层继续合并
-            let next_prefix = format!("{}{}", prefix, if is_last_child { "    " } else { "│   " });
-            
-            if current_depth + 1 <= max_depth {
-                // 构造一个虚拟节点或者直接在这里处理它们的子节点
-                let mut all_grand_children = Vec::new();
-                for &id in group {
-                    all_grand_children.extend(self.nodes[id as usize].children_ids.iter().cloned());
-                }
-                
-                if !all_grand_children.is_empty() {
-                    self.print_merged_children(&all_grand_children, &next_prefix, current_depth + 1, max_depth);
-                }
-            }
-        }
-    }
-
-    fn print_merged_children(&self, children_ids: &[u32], prefix: &str, current_depth: usize, max_depth: usize) {
-        if current_depth > max_depth {
-            return;
-        }
-
-        let mut grouped_children: std::collections::HashMap<u64, Vec<u32>> = std::collections::HashMap::new();
-        let mut order: Vec<u64> = Vec::new();
-
-        for &child_id in children_ids {
-            let child = &self.nodes[child_id as usize];
-            if !grouped_children.contains_key(&child.func_addr) {
-                order.push(child.func_addr);
-            }
-            grouped_children.entry(child.func_addr).or_default().push(child_id);
-        }
-
-        for (i, &func_addr) in order.iter().enumerate() {
-            let is_last_child = i == order.len() - 1;
-            let group = &grouped_children[&func_addr];
-            
-            let count = group.len();
-            
-            let mut calls = Vec::new();
-            for &id in group {
-                let n = &self.nodes[id as usize];
-                calls.push((n.call_line, n.ret_line));
-            }
-            
-            let marker = if is_last_child { "└── " } else { "├── " };
-            
-            if count == 1 {
-                let n = &self.nodes[group[0] as usize];
-                println!("{}{}0x{:x} ({},{})", prefix, marker, func_addr, n.call_line, n.ret_line);
-            } else {
-                let ranges: String = calls.iter()
-                    .take(3)
-                    .map(|(c, r)| format!("{}->{}", c, r))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                let more = if count > 3 { "..." } else { "" };
-                println!("{}{}0x{:x} [共{}次] ({}{})", prefix, marker, func_addr, count, ranges, more);
-            }
-
-            let next_prefix = format!("{}{}", prefix, if is_last_child { "    " } else { "│   " });
-            
-            if current_depth + 1 <= max_depth {
-                let mut all_grand_children = Vec::new();
-                for &id in group {
-                    all_grand_children.extend(self.nodes[id as usize].children_ids.iter().cloned());
-                }
-                
-                if !all_grand_children.is_empty() {
-                    self.print_merged_children(&all_grand_children, &next_prefix, current_depth + 1, max_depth);
-                }
-            }
-        }
-    }
-
     fn print_tree(&self, node_id: u32, prefix: &str, is_last: bool, max_depth: usize, current_depth: usize) {
         if current_depth > max_depth {
             return;
         }
 
         let node = &self.nodes[node_id as usize];
-        
+
         if node_id == 0 {
             println!("根节点");
         } else {
             let node_prefix = if is_last { "└── " } else { "├── " };
             println!("{}{}0x{:x} ({},{})",
-                prefix, node_prefix, node.func_addr, node.call_line, node.ret_line);
+                     prefix, node_prefix, node.func_addr, node.call_line, node.ret_line);
         }
 
         let children = &node.children_ids;
@@ -430,7 +290,6 @@ impl CallTree {
             }
         }
 
-        
         deepest_node_id.map(|node_id| {
             let current_node = self.nodes[node_id as usize].clone();
             let call_chain = self.get_call_chain(node_id);
@@ -471,31 +330,27 @@ impl CallTree {
     }
 }
 
-pub fn print_call_summary(call_tree: &CallTree) {
-    println!("=== 基于正向扫描的函数调用分析 ===");
-    let nodes = &call_tree.nodes;
-    
-    // nodes.len() 包含 1个全局虚节点 和 1个初始函数节点，所以实际调用数为 len - 2
-    let actual_calls = nodes.len().saturating_sub(2);
-    println!("总函数调用数: {}", actual_calls);
-    
+pub fn print_call_summary(function_calls: &[FunctionCall]) {
+    println!("=== 基于 ret 指令的函数调用分析 ===");
+    println!("总函数调用数: {}", function_calls.len());
+
     let mut func_call_count: HashMap<u64, usize> = HashMap::new();
-    for node in nodes.iter().skip(2) {
-        *func_call_count.entry(node.func_addr).or_insert(0) += 1;
+    for call in function_calls {
+        *func_call_count.entry(call.target_func_addr).or_insert(0) += 1;
     }
-    
+
     println!("\n被调用函数统计 (前20个):");
     let mut sorted_funcs: Vec<_> = func_call_count.iter().collect();
     sorted_funcs.sort_by(|a, b| b.1.cmp(a.1));
-    
+
     for (i, (&addr, &count)) in sorted_funcs.iter().take(20).enumerate() {
         println!("  {}. 0x{:x}: {} 次", i + 1, addr, count);
     }
-    
+
     println!("\n前20个函数调用详情:");
-    for (i, node) in nodes.iter().skip(2).take(20).enumerate() {
+    for (i, call) in function_calls.iter().take(20).enumerate() {
         println!("  {}. 调用行: {} → 函数: 0x{:x} → 返回行: {}",
-            i + 1, node.call_line, node.func_addr, node.ret_line);
+                 i + 1, call.call_line, call.target_func_addr, call.ret_line);
     }
 }
 
@@ -504,15 +359,15 @@ pub fn test_build_call_tree() {
         Ok(analyzer) => {
             let instructions = analyzer.instructions().to_vec();
             let analyzer = FunctionCallAnalyzer::new(instructions);
-            
+
             println!("=== 构建调用树 ===");
             let call_tree = analyzer.build_call_tree();
-            
+
             println!("总节点数: {}", call_tree.get_node_count());
             println!("最大深度: {}", call_tree.get_max_depth());
-            
-            println!("\n调用树结构 (合并显示, 深度限制为 10):");
-            call_tree.print_merged(51);
+
+            println!("\n调用树结构 (深度限制为 5):");
+            call_tree.print(5);
         }
         Err(e) => {
             eprintln!("错误: 无法读取文件: {}", e);
@@ -530,8 +385,8 @@ mod tests {
             Ok(analyzer) => {
                 let instructions = analyzer.instructions().to_vec();
                 let analyzer = FunctionCallAnalyzer::new(instructions);
-                let call_tree = analyzer.build_call_tree();
-                print_call_summary(&call_tree);
+                let (function_calls, _) = analyzer.analyze();
+                print_call_summary(&function_calls);
             }
             Err(e) => {
                 eprintln!("错误: 无法读取文件: {}", e);
@@ -545,15 +400,19 @@ mod tests {
             Ok(analyzer) => {
                 let instructions = analyzer.instructions().to_vec();
                 let analyzer = FunctionCallAnalyzer::new(instructions);
-                
+                let (function_calls, first_unmatched_ret) = analyzer.analyze();
+                let first_func_addr = analyzer.instructions.first()
+                    .and_then(|instr| parse_hex(&instr.offset))
+                    .unwrap_or(0);
+
                 println!("=== 构建调用树 ===");
-                let call_tree = analyzer.build_call_tree();
-                
+                let call_tree = FunctionCallAnalyzer::build_tree_from_calls(&function_calls, first_func_addr, first_unmatched_ret);
+
                 println!("总节点数: {}", call_tree.get_node_count());
                 println!("最大深度: {}", call_tree.get_max_depth());
-                
-                println!("\n调用树结构 (合并显示, 深度限制为 10):");
-                call_tree.print_merged(10);
+
+                println!("\n调用树结构 (深度限制为 5):");
+                call_tree.print(10);
             }
             Err(e) => {
                 eprintln!("错误: 无法读取文件: {}", e);
@@ -567,17 +426,22 @@ mod tests {
             Ok(analyzer) => {
                 let instructions = analyzer.instructions().to_vec();
                 let analyzer = FunctionCallAnalyzer::new(instructions);
-                
-                let call_tree = analyzer.build_call_tree();
-                
+                let (function_calls, first_unmatched_ret) = analyzer.analyze();
+                let first_func_addr = analyzer.instructions.first()
+                    .and_then(|instr| parse_hex(&instr.offset))
+                    .unwrap_or(0);
+
+                let call_tree = FunctionCallAnalyzer::build_tree_from_calls(&function_calls, first_func_addr, first_unmatched_ret);
+
                 println!("=== 测试根据行号获取调用上下文 ===");
-                
-                if call_tree.nodes.len() > 2 {
-                    // test_line 取一个合理范围内的值
+
+                if !function_calls.is_empty() {
+                    let first_call = &function_calls[0];
+                    // let test_line = first_call.call_line + 1;
                     let test_line = 6666;
 
                     println!("测试行号: {}", test_line);
-                    
+
                     if let Some(context) = call_tree.get_call_context_by_line(test_line) {
                         println!("当前函数: 0x{:x}", context.current_node.func_addr);
                         println!("调用行: {}, 返回行: {}", context.current_node.call_line, context.current_node.ret_line);

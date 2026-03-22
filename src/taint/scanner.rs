@@ -184,7 +184,7 @@ pub fn scan_pass(service: &mut SearchService, cache_path: Option<&Path>) -> anyh
             state.line_count += 1;
             
             if line_num % 10000 == 0 && line_num > 0 {
-                println!("已扫描 {} 行...", line_num);
+                println!("已从cache中扫描 {} 行...", line_num);
             }
         }
     } else {
