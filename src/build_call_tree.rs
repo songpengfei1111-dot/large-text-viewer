@@ -23,6 +23,14 @@ pub struct FunctionCall {
 }
 
 #[derive(Debug, Clone)]
+pub struct BranchCall {
+    pub call_line: usize,
+    pub call_addr: u64,
+    pub target_addr: u64,
+    pub instruction: String,
+}
+
+#[derive(Debug, Clone)]
 pub struct CallTreeNode {
     pub id: u32,
     pub func_addr: u64,
@@ -30,6 +38,7 @@ pub struct CallTreeNode {
     pub ret_line: usize,
     pub parent_id: Option<u32>,
     pub children_ids: Vec<u32>,
+    pub branches: Vec<BranchCall>,
 }
 
 #[derive(Debug, Clone)]
@@ -107,10 +116,27 @@ impl FunctionCallAnalyzer {
         let first_func_addr = self.instructions.first()
             .and_then(|instr| parse_hex(&instr.offset))
             .unwrap_or(0);
-        Self::build_tree_from_calls(&function_calls, first_func_addr, &unmatched_rets)
+            
+        let mut branches = Vec::new();
+        for (i, instr) in self.instructions.iter().enumerate() {
+            let op = instr.opcode.trim();
+            if op.starts_with("bl ") || op == "bl" || op.starts_with("blr ") || op == "blr" || op.starts_with("br ") || op == "br" {
+                if let Some(call_addr) = parse_hex(&instr.offset) {
+                    let target_addr = self.extract_call_target(instr).unwrap_or(0);
+                    branches.push(BranchCall {
+                        call_line: i + 1, // Using 1-based index to match ret_line indexing if applicable, but we'll use 1-based everywhere in analyzer? Wait, analyze uses `ret_idx + 1` for line numbers.
+                        call_addr,
+                        target_addr,
+                        instruction: instr.opcode.clone(),
+                    });
+                }
+            }
+        }
+            
+        Self::build_tree_from_calls(&function_calls, first_func_addr, &unmatched_rets, &branches)
     }
 
-    pub fn build_tree_from_calls(function_calls: &[FunctionCall], first_func_addr: u64, unmatched_rets: &[UnmatchedRet]) -> CallTree {
+    pub fn build_tree_from_calls(function_calls: &[FunctionCall], first_func_addr: u64, unmatched_rets: &[UnmatchedRet], branches: &[BranchCall]) -> CallTree {
         let mut sorted_calls = function_calls.to_vec();
         sorted_calls.sort_by_key(|call| call.call_line);
 
@@ -125,6 +151,7 @@ impl FunctionCallAnalyzer {
             ret_line: usize::MAX,
             parent_id: None,
             children_ids: Vec::new(),
+            branches: Vec::new(),
         };
         nodes.push(root);
         call_stack.push(next_id);
@@ -140,6 +167,7 @@ impl FunctionCallAnalyzer {
                 ret_line: usize::MAX,
                 parent_id: Some(current_parent),
                 children_ids: Vec::new(),
+                branches: Vec::new(),
             };
             nodes[current_parent as usize].children_ids.push(next_id);
             nodes.push(first_func);
@@ -157,6 +185,7 @@ impl FunctionCallAnalyzer {
                     ret_line: un_ret.ret_line,
                     parent_id: Some(current_parent),
                     children_ids: Vec::new(),
+                    branches: Vec::new(),
                 };
                 nodes[current_parent as usize].children_ids.push(next_id);
                 nodes.push(implicit_node);
@@ -188,6 +217,7 @@ impl FunctionCallAnalyzer {
                 ret_line: call.ret_line,
                 parent_id,
                 children_ids: Vec::new(),
+                branches: Vec::new(),
             };
             nodes.push(child);
 
@@ -196,6 +226,44 @@ impl FunctionCallAnalyzer {
             }
 
             call_stack.push(child_id);
+        }
+        
+        let mut sorted_branches = branches.to_vec();
+        sorted_branches.sort_by_key(|b| b.call_line);
+        
+        for branch in sorted_branches {
+            let mut target_node_id = 0;
+            let mut max_depth = 0;
+            
+            // Find the deepest node that contains this branch line
+            for (id, node) in nodes.iter().enumerate() {
+                if node.call_line <= branch.call_line && branch.call_line <= node.ret_line {
+                    let mut depth = 0;
+                    let mut curr = Some(id as u32);
+                    while let Some(pid) = curr {
+                        depth += 1;
+                        curr = nodes[pid as usize].parent_id;
+                    }
+                    if depth > max_depth {
+                        max_depth = depth;
+                        target_node_id = id;
+                    }
+                }
+            }
+            
+            // Check if this branch is actually the starting call for ANY function node in the tree.
+            // A function call in the tree starts exactly at the branch's call_line.
+            let mut is_function_call = false;
+            for node in nodes.iter() {
+                if node.call_line == branch.call_line {
+                    is_function_call = true;
+                    break;
+                }
+            }
+            
+            if !is_function_call {
+                nodes[target_node_id].branches.push(branch);
+            }
         }
 
         CallTree { nodes }
@@ -223,12 +291,13 @@ impl FunctionCallAnalyzer {
     }
 
     fn extract_call_target(&self, instr: &AssemblyInstruction) -> Option<u64> {
-        if instr.opcode.starts_with("bl") && !instr.opcode.starts_with("blr") {
+        let op = instr.opcode.trim();
+        if op.starts_with("bl ") || op == "bl" {
             let operands = &instr.operands;
             let start = operands.find('(')?;
             let end = operands.find(')')?;
             return parse_hex(&operands[start + 1..end]);
-        } else if instr.opcode.starts_with("blr") {
+        } else if op.starts_with("blr ") || op == "blr" {
             let reg_part = &instr.operands;
             let read_regs = &instr.read_regs;
 
@@ -243,6 +312,9 @@ impl FunctionCallAnalyzer {
                 .unwrap_or(read_regs.len());
 
             return parse_hex(&read_regs[val_start..val_end]);
+        } else if op.starts_with("br ") || op == "br" {
+            // For br, we want the relative address which is stored in the offset field (the 2nd field of the log)
+            return parse_hex(&instr.offset);
         }
         None
     }
@@ -265,14 +337,26 @@ impl CallTree {
             println!("根节点");
         } else {
             let node_prefix = if is_last { "└── " } else { "├── " };
+            let ret_str = if node.ret_line == usize::MAX { "MAX".to_string() } else { node.ret_line.to_string() };
             println!("{}{}0x{:x} ({},{})",
-                     prefix, node_prefix, node.func_addr, node.call_line, node.ret_line);
+                     prefix, node_prefix, node.func_addr, node.call_line, ret_str);
         }
 
-        let children = &node.children_ids;
-        let child_count = children.len();
-        for (i, &child_id) in children.iter().enumerate() {
-            let is_last_child = i == child_count - 1;
+        // Combine children and branches, then sort them by call_line
+        let mut child_items: Vec<(usize, bool, u32)> = node.children_ids.iter().map(|&id| {
+            let call_line = self.nodes[id as usize].call_line;
+            (call_line, true, id)
+        }).collect();
+
+        for (i, branch) in node.branches.iter().enumerate() {
+            child_items.push((branch.call_line, false, i as u32));
+        }
+
+        child_items.sort_by_key(|item| item.0);
+
+        let item_count = child_items.len();
+        for (i, &(_, is_child_node, id_or_idx)) in child_items.iter().enumerate() {
+            let is_last_item = i == item_count - 1;
             let new_prefix = if node_id == 0 {
                 "".to_string()
             } else if is_last {
@@ -280,7 +364,22 @@ impl CallTree {
             } else {
                 format!("{}│   ", prefix)
             };
-            self.print_tree(child_id, &new_prefix, is_last_child, max_depth, current_depth + 1);
+
+            if is_child_node {
+                self.print_tree(id_or_idx, &new_prefix, is_last_item, max_depth, current_depth + 1);
+            } else {
+                let branch = &node.branches[id_or_idx as usize];
+                let branch_prefix = if is_last_item { "└──> " } else { "├──> " };
+                
+                if branch.instruction.starts_with("br ") || branch.instruction == "br" {
+                    println!("{}{}0x{:x} ({}) [{}]",
+                             new_prefix, branch_prefix, branch.target_addr, branch.call_line, branch.instruction);
+                } else {
+                    let ret_str = if node.ret_line == usize::MAX { "MAX".to_string() } else { node.ret_line.to_string() };
+                    println!("{}{}0x{:x} ({}, {}) [{}]",
+                             new_prefix, branch_prefix, branch.target_addr, branch.call_line, ret_str, branch.instruction);
+                }
+            }
         }
     }
 
@@ -436,7 +535,8 @@ mod tests {
                     .unwrap_or(0);
 
                 println!("=== 构建调用树 ===");
-                let call_tree = FunctionCallAnalyzer::build_tree_from_calls(&function_calls, first_func_addr, &unmatched_rets);
+                let branches = Vec::new(); // Just for test compilation
+                let call_tree = FunctionCallAnalyzer::build_tree_from_calls(&function_calls, first_func_addr, &unmatched_rets, &branches);
 
                 println!("总节点数: {}", call_tree.get_node_count());
                 println!("最大深度: {}", call_tree.get_max_depth());
@@ -459,7 +559,8 @@ mod tests {
                     .and_then(|instr| parse_hex(&instr.offset))
                     .unwrap_or(0);
 
-                let call_tree = FunctionCallAnalyzer::build_tree_from_calls(&function_calls, first_func_addr, &unmatched_rets);
+                let branches = Vec::new(); // Just for test compilation
+                let call_tree = FunctionCallAnalyzer::build_tree_from_calls(&function_calls, first_func_addr, &unmatched_rets, &branches);
 
                 println!("=== 测试根据行号获取调用上下文 ===");
 
