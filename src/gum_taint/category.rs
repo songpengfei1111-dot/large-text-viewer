@@ -120,7 +120,8 @@ pub fn classify_mnemonic(m: &str) -> InsnCategory {
         s if s.starts_with("fcvt") || s.starts_with("frint") => InsnCategory::DataMove,
         
         "isb" | "ic" => InsnCategory::Branch,
-        
+
+
         "bic" | "bics" => InsnCategory::Logic,
         "bfm" | "bfi" | "bfxil" => InsnCategory::Bitfield,
         "b" | "bl" | "br" | "blr" | "bti" => InsnCategory::Branch,
