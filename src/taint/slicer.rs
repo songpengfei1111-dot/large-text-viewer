@@ -2,7 +2,7 @@ use std::collections::{HashSet, VecDeque, HashMap};
 use crate::taint::scanner::{ScanState, DepNode};
 use crate::search_service::SearchService;
 use crate::insn_analyzer::{ParsedInsn, InsnType};
-use agf_render::{Graph, EdgeColor, layout, render_to_stdout};
+use agf_render::{Graph, EdgeColor, layout, render_to_stdout, render_to_svg};
 
 pub struct SliceResult {
     pub marked_lines: HashSet<usize>,
@@ -132,6 +132,13 @@ impl SliceResult {
         if !node_ids.is_empty() {
             layout(&mut graph);
             render_to_stdout(&graph);
+
+            let svg_content = render_to_svg(&graph);
+            if let Err(e) = std::fs::write("taint_output.svg", svg_content) {
+                eprintln!("Failed to write taint_output.svg: {}", e);
+            } else {
+                println!("SVG output written to taint_output.svg");
+            }
         } else {
             println!("图为空。");
         }
