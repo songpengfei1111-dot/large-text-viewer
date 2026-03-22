@@ -495,7 +495,6 @@ pub fn test_build_call_tree() {
             println!("总节点数: {}", call_tree.get_node_count());
             println!("最大深度: {}", call_tree.get_max_depth());
 
-            println!("\n调用树结构 (深度限制为 ):");
             call_tree.print(10);
         }
         Err(e) => {
