@@ -7,6 +7,12 @@ fn parse_hex(hex_str: &str) -> Option<u64> {
 }
 
 #[derive(Debug, Clone)]
+pub struct UnmatchedRet {
+    pub ret_line: usize,
+    pub return_addr: u64,
+}
+
+#[derive(Debug, Clone)]
 pub struct FunctionCall {
     pub call_line: usize,
     pub call_addr: u64,
@@ -56,9 +62,9 @@ impl FunctionCallAnalyzer {
         }
     }
 
-    pub fn analyze(&self) -> (Vec<FunctionCall>, Option<usize>) {
+    pub fn analyze(&self) -> (Vec<FunctionCall>, Vec<UnmatchedRet>) {
         let mut function_calls = Vec::new();
-        let mut first_unmatched_ret = None;
+        let mut unmatched_rets = Vec::new();
 
         for (ret_idx, ret_instr) in self.instructions.iter().enumerate() {
             if !ret_instr.opcode.starts_with("ret") {
@@ -72,9 +78,10 @@ impl FunctionCallAnalyzer {
 
             let Some((call_line, call_instr)) = self.find_call_instruction(call_addr, ret_idx) else {
                 eprintln!("err :[{:x},{:x}]", return_addr, call_addr);
-                if first_unmatched_ret.is_none() {
-                    first_unmatched_ret = Some(ret_idx + 1);
-                }
+                unmatched_rets.push(UnmatchedRet {
+                    ret_line: ret_idx + 1,
+                    return_addr,
+                });
                 continue;
             };
 
@@ -92,18 +99,18 @@ impl FunctionCallAnalyzer {
             });
         }
 
-        (function_calls, first_unmatched_ret)
+        (function_calls, unmatched_rets)
     }
 
     pub fn build_call_tree(&self) -> CallTree {
-        let (function_calls, first_unmatched_ret) = self.analyze();
+        let (function_calls, unmatched_rets) = self.analyze();
         let first_func_addr = self.instructions.first()
             .and_then(|instr| parse_hex(&instr.offset))
             .unwrap_or(0);
-        Self::build_tree_from_calls(&function_calls, first_func_addr, first_unmatched_ret)
+        Self::build_tree_from_calls(&function_calls, first_func_addr, &unmatched_rets)
     }
 
-    pub fn build_tree_from_calls(function_calls: &[FunctionCall], first_func_addr: u64, node1_ret_line: Option<usize>) -> CallTree {
+    pub fn build_tree_from_calls(function_calls: &[FunctionCall], first_func_addr: u64, unmatched_rets: &[UnmatchedRet]) -> CallTree {
         let mut sorted_calls = function_calls.to_vec();
         sorted_calls.sort_by_key(|call| call.call_line);
 
@@ -120,22 +127,45 @@ impl FunctionCallAnalyzer {
             children_ids: Vec::new(),
         };
         nodes.push(root);
+        call_stack.push(next_id);
         next_id += 1;
 
-        let first_func = CallTreeNode {
-            id: next_id,
-            func_addr: first_func_addr,
-            call_line: 0,
-            ret_line: node1_ret_line.unwrap_or(usize::MAX),
-            parent_id: Some(0),
-            children_ids: Vec::new(),
-        };
-        nodes[0].children_ids.push(next_id);
-        nodes.push(first_func);
-        next_id += 1;
+        let mut current_parent = 0;
 
-        call_stack.push(0);
-        call_stack.push(1);
+        if unmatched_rets.is_empty() {
+            let first_func = CallTreeNode {
+                id: next_id,
+                func_addr: first_func_addr,
+                call_line: 0,
+                ret_line: usize::MAX,
+                parent_id: Some(current_parent),
+                children_ids: Vec::new(),
+            };
+            nodes[current_parent as usize].children_ids.push(next_id);
+            nodes.push(first_func);
+            call_stack.push(next_id);
+            next_id += 1;
+        } else {
+            for (i, un_ret) in unmatched_rets.iter().rev().enumerate() {
+                let is_innermost = i == unmatched_rets.len() - 1;
+                let f_addr = if is_innermost { first_func_addr } else { 0 };
+
+                let implicit_node = CallTreeNode {
+                    id: next_id,
+                    func_addr: f_addr,
+                    call_line: 0,
+                    ret_line: un_ret.ret_line,
+                    parent_id: Some(current_parent),
+                    children_ids: Vec::new(),
+                };
+                nodes[current_parent as usize].children_ids.push(next_id);
+                nodes.push(implicit_node);
+                call_stack.push(next_id);
+
+                current_parent = next_id;
+                next_id += 1;
+            }
+        }
 
         for call in &sorted_calls {
             while let Some(&current_id) = call_stack.last() {
@@ -366,8 +396,8 @@ pub fn test_build_call_tree() {
             println!("总节点数: {}", call_tree.get_node_count());
             println!("最大深度: {}", call_tree.get_max_depth());
 
-            println!("\n调用树结构 (深度限制为 5):");
-            call_tree.print(5);
+            println!("\n调用树结构 (深度限制为 ):");
+            call_tree.print(10);
         }
         Err(e) => {
             eprintln!("错误: 无法读取文件: {}", e);
@@ -400,18 +430,16 @@ mod tests {
             Ok(analyzer) => {
                 let instructions = analyzer.instructions().to_vec();
                 let analyzer = FunctionCallAnalyzer::new(instructions);
-                let (function_calls, first_unmatched_ret) = analyzer.analyze();
+                let (function_calls, unmatched_rets) = analyzer.analyze();
                 let first_func_addr = analyzer.instructions.first()
                     .and_then(|instr| parse_hex(&instr.offset))
                     .unwrap_or(0);
 
                 println!("=== 构建调用树 ===");
-                let call_tree = FunctionCallAnalyzer::build_tree_from_calls(&function_calls, first_func_addr, first_unmatched_ret);
+                let call_tree = FunctionCallAnalyzer::build_tree_from_calls(&function_calls, first_func_addr, &unmatched_rets);
 
                 println!("总节点数: {}", call_tree.get_node_count());
                 println!("最大深度: {}", call_tree.get_max_depth());
-
-                println!("\n调用树结构 (深度限制为 5):");
                 call_tree.print(10);
             }
             Err(e) => {
@@ -426,12 +454,12 @@ mod tests {
             Ok(analyzer) => {
                 let instructions = analyzer.instructions().to_vec();
                 let analyzer = FunctionCallAnalyzer::new(instructions);
-                let (function_calls, first_unmatched_ret) = analyzer.analyze();
+                let (function_calls, unmatched_rets) = analyzer.analyze();
                 let first_func_addr = analyzer.instructions.first()
                     .and_then(|instr| parse_hex(&instr.offset))
                     .unwrap_or(0);
 
-                let call_tree = FunctionCallAnalyzer::build_tree_from_calls(&function_calls, first_func_addr, first_unmatched_ret);
+                let call_tree = FunctionCallAnalyzer::build_tree_from_calls(&function_calls, first_func_addr, &unmatched_rets);
 
                 println!("=== 测试根据行号获取调用上下文 ===");
 
