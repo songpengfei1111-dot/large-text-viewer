@@ -1,4 +1,4 @@
-// src/taint/mod.rs
+// traceui/taint/mod.rs
 pub mod scanner;
 pub mod slicer;
 pub mod preprocessor;

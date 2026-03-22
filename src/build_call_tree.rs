@@ -116,7 +116,7 @@ impl FunctionCallAnalyzer {
             let opcode = instr.opcode.trim().to_lowercase();
             
             // 匹配所有分支跳转相关的调用 (bl, blr, b.eq, b.ne, 等等如果当作调用处理的话，这里严格按 bl/blr)
-            // 根据 doc/src 里的实现，主要匹配 bl 和 blr
+            // 根据 doc/traceui 里的实现，主要匹配 bl 和 blr
             if opcode.starts_with("bl") && !opcode.starts_with("blr") {
                 let target = self.extract_call_target(instr).unwrap_or(0);
                 let child_id = next_id;

@@ -184,7 +184,7 @@ fn find_real_dst(g: &Graph, start: NodeId) -> NodeId {
     }
 }
 
-/// 收集从 src 到 real_dst 路径上所有节点的 x 坐标（包含哑节点段）
+/// 收集从 traceui 到 real_dst 路径上所有节点的 x 坐标（包含哑节点段）
 fn collect_waypoints(g: &Graph, src: NodeId, first_hop: NodeId, real_dst: NodeId) -> Vec<(i32, i32)> {
     let src_node = &g.nodes[src];
     let mut points = vec![(src_node.bottom_center_x(), src_node.bottom_y())];
@@ -281,7 +281,7 @@ fn draw_edge_path(
 ///    │        ▼   (forward edges to children...)
 ///    │        ...
 ///    │   ┌────────────┐
-///    │   │  source    │    ← src.y
+///    │   │  source    │    ← traceui.y
 ///    │   └────────────┘
 ///    │        │            ← Step 1: │ (y = ay+1)
 ///    └────────┘            ← Step 2: └...┘ (y = ay + ybp1 + 2)
@@ -296,7 +296,7 @@ fn draw_back_edges(canvas: &mut Canvas, g: &Graph) {
 
         // ── 源/目标坐标（对应 rizin: ax, ay, bx, by）────────────────────
         let ax = src.bottom_center_x();
-        let ay = src.bottom_y();         // = src.y + src.h（底部边框下方一行）
+        let ay = src.bottom_y();         // = traceui.y + traceui.h（底部边框下方一行）
         let bx = dst.top_center_x();
         let by = dst.top_y() - 1;        // = dst.y - 1（顶部边框上方一行）
 

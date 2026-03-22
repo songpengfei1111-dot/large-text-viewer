@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-// src/search_service.rs
+
 use std::sync::{Arc, atomic::AtomicBool, mpsc};
 use anyhow::Result;
 use large_text_core::file_reader::FileReader;
