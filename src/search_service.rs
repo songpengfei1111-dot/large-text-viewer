@@ -318,13 +318,11 @@ impl SearchService {
             let mut search_config = config.clone();
             search_config.line_start = Some(search_start + 1);  // 转换为 1-based
             search_config.line_end = Some(search_end);
-            search_config.max_results = 5000;  // 放大窗口内结果数量以防止漏掉
+            search_config.max_results = 100_000;  // 放大窗口内结果数量以防止漏掉
             
             if let Ok(summary) = self.search(search_config) {
                 // 因为返回的结果是从上到下的，所以我们需要反转或者取最后一个，其实我们要找最接近 current_line 的那一个
-                // 但是对于 "st__" 这种大量的匹配，我们应该从下往上遍历所有结果
-                // 注意：这里由于 search API 会返回 max_results 个结果，可能并不能包含所有的匹配项
-                // 为了兼容基于 `SearchService` 的 `find_prev` 我们这里仅做简单返回最后一个
+                
                 if let Some(last_match) = summary.matches
                     .into_iter()
                     .filter(|m| m.line_number < current_line)

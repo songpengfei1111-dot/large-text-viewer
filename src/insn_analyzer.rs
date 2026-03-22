@@ -140,6 +140,9 @@ impl ParsedInsn {
     
     /// 获取Load指令信息 (目标寄存器列表, 内存地址, 访问大小)
     pub fn get_load_info(&self) -> Result<(Vec<String>, u64, usize)> {
+        if self.insn_type != InsnType::Load {
+            return Err(anyhow!("Not a load instruction"));
+        }
         let addr = self.mem_addr.ok_or_else(|| anyhow!("No memory address"))?;
         let size = self.mem_size.ok_or_else(|| anyhow!("No memory size"))?;
         
@@ -148,6 +151,9 @@ impl ParsedInsn {
     
     /// 获取Store指令信息 (源寄存器列表, 内存地址, 访问大小)
     pub fn get_store_info(&self) -> Result<(Vec<String>, u64, usize)> {
+        if self.insn_type != InsnType::Store {
+            return Err(anyhow!("Not a store instruction"));
+        }
         let addr = self.mem_addr.ok_or_else(|| anyhow!("No memory address"))?;
         let size = self.mem_size.ok_or_else(|| anyhow!("No memory size"))?;
         
@@ -209,42 +215,42 @@ impl ParsedInsn {
     }
 
     /// 生成寄存器写入的搜索pattern
-    pub fn gen_reg_write_pattern(reg: &str, value: &str) -> SearchPattern {
-        // 使用精确子串匹配，大大提高搜索速度，并支持SIMD
-        let norm_reg = Self::normalize_reg(reg);
-        let pattern = format!("rw__{}=", norm_reg);
+    pub fn gen_reg_write_pattern(reg: &str, _value: &str) -> SearchPattern {
+        let mut chars = reg.chars();
+        let first = chars.next().unwrap_or(' ');
+        let rest: String = chars.collect();
+        
+        let (pattern, is_regex) = match first {
+            'w' | 'W' | 'x' | 'X' => {
+                (format!("rw__[wx]{}=", rest), true)
+            },
+            's' | 'S' | 'd' | 'D' | 'q' | 'Q' | 'b' | 'B' | 'h' | 'H' | 'v' | 'V' => {
+                if rest.chars().all(|c| c.is_ascii_digit()) {
+                    (format!("rw__[sdqbhv]{}=", rest), true)
+                } else {
+                    (format!("rw__{}=", reg), false)
+                }
+            },
+            _ => (format!("rw__{}=", reg), false)
+        };
         
         SearchPattern {
             pattern,
-            is_regex: false,
-            description: format!("查找写入寄存器 {} (规范为 {}) 的指令", reg, norm_reg),
+            is_regex,
+            description: format!("查找写入寄存器 {} 的指令", reg),
         }
     }
 
     /// 生成寄存器读取的搜索pattern
-    pub fn gen_reg_read_pattern(reg: &str, value: &str) -> SearchPattern {
-        let norm_reg = Self::normalize_reg(reg);
-        let pattern = format!("rw__{}=", norm_reg);
-        
-        SearchPattern {
-            pattern,
-            is_regex: false,
-            description: format!("查找寄存器 {} (规范为 {}) 的定义位置", reg, norm_reg),
-        }
+    pub fn gen_reg_read_pattern(reg: &str, _value: &str) -> SearchPattern {
+        Self::gen_reg_write_pattern(reg, _value)
     }
 
     /// 生成算术运算的搜索pattern
     pub fn gen_arith_patterns(src_regs: &[(String, String)]) -> Vec<SearchPattern> {
         src_regs.iter()
             .map(|(reg, _val)| {
-                let norm_reg = Self::normalize_reg(reg);
-                let pattern = format!("rw__{}=", norm_reg);
-                
-                SearchPattern {
-                    pattern,
-                    is_regex: false,
-                    description: format!("查找写入寄存器 {} (规范为 {}) 的指令", reg, norm_reg),
-                }
+                Self::gen_reg_write_pattern(reg, "")
             })
             .collect()
     }

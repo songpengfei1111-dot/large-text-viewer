@@ -15,7 +15,7 @@ pub fn test_taint_by_search() -> anyhow::Result<()> {
     // ldr x20, [sp, #0xc08] 读取 0x6cf01586a8 (8字节) -> 假设我们要追踪 x20
     // 行号: 9028 (CSV中 0-based 索引为 9027)
     let start_line = 9027;
-    let target = TaintTarget::Reg("x20".to_string());
+    let target = TaintTarget::Reg("x20".to_string(), None);
     
     println!("=== 开始 taint_by_search 追踪 ===");
     println!("追踪目标: {} 从行 {}", target, start_line + 1);
