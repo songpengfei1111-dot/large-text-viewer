@@ -5,6 +5,7 @@ mod summery_analyzer;
 mod build_call_tree;
 mod taint;
 mod taint_by_search;
+mod gum_taint;
 
 fn main() {
     // 测试正则分析引擎 (带有数据剪枝与可视化重构)
@@ -15,7 +16,11 @@ fn main() {
         eprintln!("Error: {}", e);
     }
     
-    if let Err(e) = taint_by_search::test_taint_by_search() {
+    // if let Err(e) = taint_by_search::test_taint_by_search() {
+    //     eprintln!("Error: {}", e);
+    // }
+    
+    if let Err(e) = gum_taint::test_gum_taint() {
         eprintln!("Error: {}", e);
     }
 }
